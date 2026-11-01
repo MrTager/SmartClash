@@ -1,0 +1,19 @@
+name: Build Intel macOS
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+jobs:
+  build:
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and package
+        run: bash script/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SmartClash-Intel
+          path: dist/SmartClash-Intel.dmg
