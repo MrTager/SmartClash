@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+dist/
+Resources/mihomo
+Resources/core-release.json
+.DS_Store
