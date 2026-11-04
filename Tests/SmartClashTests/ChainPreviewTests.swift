@@ -6,6 +6,67 @@ import AppKit
 
 final class ChainPreviewTests: XCTestCase {
     @MainActor
+    func testOfflineTrafficModesRender() async throws {
+        guard ProcessInfo.processInfo.environment["SMARTCLASH_RENDER_PREVIEW"] == "1" else { throw XCTSkip("Opt-in offline UI rendering") }
+        let stores = TrafficMode.allCases.map { mode -> AppStore in
+            let store = AppStore(loadFromDisk: false)
+            store.preferences.trafficMode = mode; store.running = true
+            store.ruleSnapshot = RuleSnapshot(modules: [.direct: ConvertedRuleModule(domains: ["+.example.cn"])])
+            store.ruleUpdateMessage = "已更新 334864 条规则"
+            return store
+        }
+        let size = NSSize(width: 1040, height: 910)
+        let content = VStack(alignment: .leading, spacing: 20) {
+            Text("流量模式").font(.largeTitle.bold())
+            ForEach(Array(stores.enumerated()), id: \.offset) { _, store in
+                TrafficModeControls().environmentObject(store)
+            }
+        }.padding(24).frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light)
+        _ = NSApplication.shared
+        let hosting = NSHostingView(rootView: content)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        defer { window.contentView = nil; window.close() }
+        hosting.frame = NSRect(origin: .zero, size: size); hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        let filename = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("dist/traffic-modes-preview.png")
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: filename)
+    }
+    @MainActor
+    func testBackgroundLatencyViewRendersWithExistingResults() async throws {
+        guard ProcessInfo.processInfo.environment["SMARTCLASH_RENDER_PREVIEW"] == "1" else {
+            throw XCTSkip("Opt-in offline UI rendering")
+        }
+        let source = Source(name: "离线示例订阅", url: "https://example.com")
+        let store = AppStore(loadFromDisk: false)
+        store.nodes = try SubscriptionParser.parse("proxies: [{name: 已有测速结果, type: trojan, server: example.com, port: 443, password: test}, {name: 尚未测速, type: trojan, server: example.org, port: 443, password: test}]", source: source)
+        store.preferences.sources = [source]
+        store.running = true; store.busy = true; store.isTestingLatency = true
+        store.latencyCompleted = 1; store.latencyTotal = 2
+        store.selected = store.nodes[0].name
+        store.latencies[store.nodes[0].id] = NodeLatency(milliseconds: 127)
+        let size = NSSize(width: 960, height: 650)
+        let content = NodesView().environmentObject(store).padding(24).frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light)
+        _ = NSApplication.shared
+        let hosting = NSHostingView(rootView: content)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        defer { window.contentView = nil; window.close() }
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        hosting.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let filename = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("dist/nodes-background-preview.png")
+        try data.write(to: filename, options: .atomic)
+    }
+    @MainActor
     func testOfflineChainViewRenders() async throws {
         guard ProcessInfo.processInfo.environment["SMARTCLASH_RENDER_PREVIEW"] == "1" else {
             throw XCTSkip("Opt-in offline UI rendering")

@@ -1,12 +1,6 @@
 import Foundation
 import ProxyLogic
-struct ProxySnapshot: Codable {
-    var service: String
-    var kind: String
-    var host: String
-    var port: Int
-    var enabled: Bool
-}
+import PrivilegedSupport
 @MainActor
 final class SystemProxy {
     private let backup = Files.root.appendingPathComponent("proxy-backup.json")
@@ -40,30 +34,18 @@ final class SystemProxy {
             }
         }
         guard !snapshots.isEmpty else { throw ProxyError.message("没有可用网络服务") }
+        // Obtain the one-time installation consent before writing a recovery record or changing the network.
+        try await PrivilegedClient.shared.prepare()
+        try Task.checkCancellation()
         // Persist BEFORE changing any service, so a partial change or crash remains recoverable.
         try Files.write(JSONEncoder().encode(snapshots), to: backup)
-        var commands = ["set -e"]
-        for item in snapshots {
-            commands.append(command("-set" + item.kind, [item.service, "127.0.0.1", String(Configuration.proxyPort)]))
-            commands.append(command("-set" + item.kind + "state", [item.service, "on"]))
-        }
-        do { try await Command.admin(commands.joined(separator: "\n")) }
+        do { try await PrivilegedClient.shared.setSystemProxy(JSONEncoder().encode(snapshots), enabled: true) }
         catch { try? await restore(); throw error }
     }
     func restore() async throws {
         guard hasBackup else { return }
-        let snapshots = try JSONDecoder().decode([ProxySnapshot].self, from: Data(contentsOf: backup))
-        var commands = ["set -e"]
-        for item in snapshots {
-            if !item.host.isEmpty && item.port > 0 {
-                commands.append(command("-set" + item.kind, [item.service, item.host, String(item.port)]))
-            }
-            commands.append(command("-set" + item.kind + "state", [item.service, item.enabled ? "on" : "off"]))
-        }
-        try await Command.admin(commands.joined(separator: "\n"))
+        let snapshots = try Data(contentsOf: backup)
+        try await PrivilegedClient.shared.setSystemProxy(snapshots, enabled: false)
         try FileManager.default.removeItem(at: backup)
-    }
-    private func command(_ op: String, _ args: [String]) -> String {
-        (["/usr/sbin/networksetup", op] + args).map(Command.quote).joined(separator: " ")
     }
 }

@@ -15,18 +15,20 @@ struct ChainView: View {
                     Spacer()
                     if store.running || store.busy || store.recovery {
                         Button(store.stopping ? "正在停止…" : "停止并恢复网络") { store.requestStop() }
-                            .buttonStyle(.borderedProminent).disabled(store.stopping)
+                            .buttonStyle(.borderedProminent)
                     } else {
                         Button("连接所选模式") { store.perform { try await store.oneClickConnect() } }
-                            .buttonStyle(.borderedProminent).disabled(store.isTestingLatency)
+                            .buttonStyle(.borderedProminent)
                     }
                 }
-                if store.busy { HStack { ProgressView().controlSize(.small); Text("正在执行操作，可随时停止").font(.caption) } }
+                if store.busy { Text("正在后台处理，可随时停止或执行其他操作").font(.caption).foregroundStyle(.secondary) }
+                TrafficRateBar(traffic: store.traffic)
+                NetworkGlobePanel(activity: store.activity, nodes: store.visualizationNodes, trace: store.activeTrace)
                 RoutingModeControls().environmentObject(store)
                 GroupBox("当前实际生效路径") {
                     VStack(alignment: .leading, spacing: 14) {
                         if store.activeTrace.hops.isEmpty {
-                            Label("尚未连接；连接成功后显示真实节点顺序", systemImage: "point.3.connected.trianglepath.dotted")
+                            Label(store.running && store.trafficMode == .direct ? "直连模式：本机 → 互联网，不经过代理节点" : "尚未连接；连接成功后显示真实节点顺序", systemImage: "point.3.connected.trianglepath.dotted")
                                 .foregroundStyle(.secondary).padding(16)
                         } else {
                             ScrollView(.horizontal) {
@@ -54,7 +56,7 @@ struct ChainView: View {
                 TrafficPanel(traffic: store.traffic)
                 Toggle("探索多跳链路（高级）", isOn: Binding(get: { store.preferences.exploreMultihop == true }, set: {
                     store.preferences.exploreMultihop = $0; store.savePreferences()
-                })).toggleStyle(.checkbox).disabled(store.running || store.busy || store.isTestingLatency)
+                })).toggleStyle(.checkbox).disabled(store.running)
                 Text("图中路径来自当前选中节点及实际 dialer-proxy 引用，不以动画假装连接。后台守护不会锁住页面；已有 TCP 连接在出口切换时仍可能需要重连。")
                     .font(.caption).foregroundStyle(.secondary)
             }

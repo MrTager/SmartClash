@@ -11,11 +11,13 @@ final class CoreClient: @unchecked Sendable {
     }
     @discardableResult
     func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 4) async throws -> [String: Any] {
+        try Task.checkCancellation()
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(Configuration.controllerPort)\(path)")!)
         req.timeoutInterval = timeout
         req.httpMethod = method; req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: req)
+        try Task.checkCancellation()
         guard let r = response as? HTTPURLResponse, (200..<300).contains(r.statusCode) else {
             throw ProxyError.message("内核控制接口调用失败：\(path)")
         }
@@ -23,6 +25,20 @@ final class CoreClient: @unchecked Sendable {
     }
     func select(_ name: String, group: String) async throws {
         try await request("/proxies/\(group)", method: "PUT", body: ["name": name])
+    }
+    func setTrafficMode(_ mode: TrafficMode) async throws {
+        if mode == .global { try await select("SMART", group: "GLOBAL") }
+        try await request("/configs", method: "PATCH", body: ["mode": mode.rawValue])
+        let current = try await request("/configs")
+        guard current["mode"] as? String == mode.rawValue else { throw ProxyError.message("内核未确认流量模式，已尝试恢复原模式") }
+    }
+    func closeConnections() async throws { try await request("/connections", method: "DELETE") }
+    func updateRuleProviders() async throws {
+        for category in RuleCategory.allCases {
+            for behavior in ["domain", "classical"] {
+                try await request("/providers/rules/\(category.provider(behavior))", method: "PUT", timeout: 30)
+            }
+        }
     }
     func delay(_ name: String, timeout: Int = 5000) async -> NodeLatency {
         do {
@@ -85,5 +101,9 @@ final class CoreClient: @unchecked Sendable {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+    func connections() async throws -> ConnectionSnapshot {
+        let document = try await request("/connections")
+        return try JSONDecoder().decode(ConnectionSnapshot.self, from: JSONSerialization.data(withJSONObject: document))
     }
 }

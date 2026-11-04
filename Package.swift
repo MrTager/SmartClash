@@ -6,9 +6,12 @@ let package = Package(
     dependencies: [.package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.2")],
     targets: [
         .target(name: "ProxyLogic", dependencies: ["Yams"]),
-        .executableTarget(name: "SmartClash", dependencies: ["ProxyLogic"]),
+        .target(name: "PrivilegedSupport", dependencies: ["ProxyLogic"]),
+        .executableTarget(name: "SmartClashHelper", dependencies: ["PrivilegedSupport", "ProxyLogic"]),
+        .executableTarget(name: "SmartClash", dependencies: ["ProxyLogic", "PrivilegedSupport"], resources: [.process("Resources")]),
         .executableTarget(name: "SmartClashImport", dependencies: ["ProxyLogic", "Yams"]),
         .testTarget(name: "ProxyLogicTests", dependencies: ["ProxyLogic"]),
+        .testTarget(name: "PrivilegedSupportTests", dependencies: ["PrivilegedSupport", "ProxyLogic"]),
         .testTarget(name: "SmartClashTests", dependencies: ["SmartClash", "ProxyLogic"])
     ]
 )

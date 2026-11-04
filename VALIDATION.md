@@ -74,3 +74,45 @@ Mac 上额外验收：
 - 使用当前代理读取普通测试页，获得 HTTPS 204 与 Apple 页面 200；限量下载测试获得 HTTP 200、完整 1,048,576 字节及非零下载速率。该测量仅验证接口和当前线路，不作为全节点高速模式验收结果。
 - 离线 UI 通过不可见 NSHostingView 宿主渲染，增加非空像素断言，人工检查链路图、三模式选择、累计字段和实时曲线。预览明确标为示例数据，不是当前连接截图。
 - 当前在用的旧客户端及系统代理保持运行，没有为构建而中断；源码和 dist 包准备好后仍需用户允许重启安装。安装后还需对实际模式切换、流量长期记录以及 TUN 管理员路径做最终验收。
+
+## 2026-11-04 后台检测与停止响应修复（build 8）
+
+- 移除工具栏、链路页和节点页的加载动画。检测期间不再按忙碌或测速状态禁用页面、菜单和模式按钮；无节点、内核未运行、网络待恢复等实际前提仍按原规则处理。
+- 新操作取消旧操作，等待其清理完成后执行；停止优先取消检测，恢复网络期间的新操作等待恢复结束。取消后的网络响应不会覆盖已有延迟结果或继续切换节点。
+- 已执行 `SMARTCLASH_RENDER_PREVIEW=1 bash script/build.sh`：70 项测试，68 项通过、2 项真实内核集成测试按默认设置跳过、0 失败；Intel release 应用构建和签名校验成功。新增覆盖操作替换、清理顺序、停止期间提交操作、重复停止、测速中执行其他操作、单节点测速替换全量测速、保留旧结果和预先取消时不发起请求。
+- 已检查离线节点页预览 `dist/nodes-background-preview.png`：后台测速只显示文字计数，保留 127 ms 示例结果，测速和选择按钮保持可用，无加载动画。示例数据不代表真实节点检测。
+- 验证未重启当前在用客户端，也未修改系统代理或 TUN；当前运行版本仍为 0.4.1 / build 6，使用本次修复需要退出旧版后打开新构建。
+
+## 2026-11-04 · v0.6.0 地球与流量展示
+
+- `bash script/package.sh`：通过。85 项测试中 78 项通过、7 项按设计跳过（需要显式启用的真实内核或图像测试），Intel release 构建、plist、架构与应用签名校验通过；已生成 `dist/SmartClash.app` 和 `dist/SmartClash-Intel.dmg`，版本 0.6.0 / build 9。
+- `SMARTCLASH_LIVE_TEST=1 SMARTCLASH_LIVE_RENDER=1 swift test --arch x86_64 --filter GlobeAndTrafficTests`：9 项通过，包含真实运行内核 `/connections` 读取、实际节点与请求位置渲染，以及跨洲弧线的橙色像素可见性检查。真实连接渲染观察到 6 条连线、6 个不同位置；渲染图片分别为 `dist/globe-live-render.png`（真实连接）和 `dist/globe-fixture-render.png`（固定东京至旧金山样例）。之后仅调整了默认镜头距离以留出完整弧线空间，打包测试已重新通过。
+- 新增覆盖：`connections: null`、目标 IP 缺失、不能把 `remoteDestination` 代理对端当作网站目标、私网/保留/fake IP 排除、旧连接在出口切换后的节点归属、缺失/循环 dialer 引用、流量断流后的累计差值恢复、交错旧计数不重复累计、断开后的速度清零、同位置/对跖点/跨日期线弧线数值稳定性。
+- 地球底图已实际包含在应用 Resources 的 SwiftPM 资源包内，应用优先从安装包内加载；无在线地图瓦片依赖。
+- 检查时 `/Applications/SmartClash.app` 正在运行 0.4.1 并接管系统代理。未强制终止旧进程；正常退出、恢复代理后才能切换到新安装包。新版原生窗口的交互验收和替换安装尚待此次重启。
+
+## 2026-11-04 · v0.7.0 三种流量模式与规则订阅
+
+- 新增规则代理 / 全局代理 / 直连，与已有低延迟 / 高速 / AI 选路独立。使用 PATCH `/configs` 并回读确认，GLOBAL 固定选择 SMART；成功切换后 DELETE `/connections` 关闭旧会话。失败执行不受前台取消影响的模式回滚，未确认恢复时提示恢复网络。
+- 新增模式生成、无节点直连、规则优先级、域名 / 后缀 / 关键词 / IPv4 / IPv6 转换、每小时刷新边界、缓存兼容、截断 / 空内容 / 异常格式拒收、旧偏好兼容、切换失败回滚及直连不检测节点等测试。
+- 已从上游实际下载三份模块并运行转换测试：334,864 条可用规则；跳过 161 条 URL-REGEX、USER-AGENT 或无效条目，其中上游有一条重复类型字段的无效域名行。转换结果只保存在临时验收目录，不加入源码或应用包。模块声明条目数用于防止接收截断文件。
+- `SMARTCLASH_RULE_FIXTURES=/tmp/smartclash-mode-validation SMARTCLASH_RENDER_PREVIEW=1 bash script/package.sh` 运行完整测试、离线 UI 渲染、Intel release 构建和打包。外部下载 fixture 测试需预先将上游三份 `.module` 文件放入环境变量指定目录；它同时生成供下一步使用的配置与 YAML。
+- 最终打包通过：96 项测试中 91 项通过、5 项需要显式启用的真实生产内核 / 地球渲染测试跳过、0 失败；Intel release 编译、应用签名校验、DMG 生成成功。交付 `dist/SmartClash.app` 和 `dist/SmartClash-Intel.dmg`，版本 0.7.0 / build 10。
+- `python3 script/check_modes.py --fixtures /tmp/smartclash-mode-validation` 使用项目内 Mihomo、随机回环端口、临时工作目录和本地 HTTP 代理 / 目标服务器验收。已通过完整上游六个规则集加载、规则直连 / 代理 / 屏蔽、全局出口 A → B 跟随 SMART、PROBE 独立、直连绕过代理、旧会话关闭、API 热更新后立即匹配、无订阅节点直连。不会连接当前生产内核。
+- 新界面离线预览：`dist/traffic-modes-preview.png`。更新计划独立于节点健康检测，即使停止内核或使用 TUN 也继续计时；应用退出时取消更新，下次启动根据缓存时间补查。
+- 本轮未启用 root TUN 或替换正在运行的旧客户端。TUN 仍需管理员授权进行接管、DNS、联网和停止后恢复的实机验收；无权限改写 root 文件的 GUI 通过本机 HTTP 规则集与内核 API 更新规则。
+
+## 2026-11-04 · v0.7.0 本机替换安装验收
+
+- 按用户要求重新执行 `script/package.sh`，再通过 `script/build_and_run.sh --update` 替换安装并启动 `/Applications/SmartClash.app`。已确认版本 0.7.0 / build 10、运行进程来自 `/Applications`，已安装可执行文件与本次构建 SHA-256 一致，应用签名校验通过。
+- 旧版 0.4.1 / build 6 已正常退出并恢复系统代理；保留备份 `dist/SmartClash-installed-backup-20261104-141542.app`。新版启动后完成系统管理员授权，HTTP / HTTPS / SOCKS 系统代理恢复至 `127.0.0.1:17890`。
+- 新版实际界面和内核均确认规则代理生效。规则于 14:22:15 成功更新，334,864 条可用规则、161 条跳过，六个规则集均已载入；定时更新保持每小时。连接列表同时观察到 DIRECT 与代理路由。
+- 最后联网检查：经业务监听访问 Apple HTTPS 返回 200；经独立 PROBE 监听执行 HTTPS 出网检查返回 204。未启用 TUN。
+
+## 2026-11-04 · v0.7.1 一次授权后台服务
+
+- 系统代理及 TUN 的日常开关改走受签名和 UID 校验的 XPC 接口；仅首次安装 / 更新 `com.smartclash.helper` 调用管理员脚本。关闭 TUN 继续卸载 `com.smartclash.core`，保留 helper。安装清单和 launchd plist 直接由授权脚本内的固定数据生成，不加载用户可在授权期间改写的临时服务定义。
+- `swift test --arch x86_64` 与 `bash script/package.sh` 通过：108 项测试，99 项通过、9 项需显式启用的真实内核 / 图像 / 下载 fixture 测试跳过、0 失败。新增 9 项覆盖 root TUN 配置限制、固定规则文件目录、本机 API 监听、外部插件 / 文件引用拒绝、网络命令参数隔离、旧代理备份、安装签名记录及真实 `codesign` 校验参数（文本要求必须带 `=` 前缀）。
+- 已生成 `dist/SmartClash.app` 和 `dist/SmartClash-Intel.dmg`，版本 0.7.1 / build 11；应用和 helper 为 Intel、ad-hoc 签名并开启 hardened runtime，应用完整签名校验通过。
+- 当前 `/Applications/SmartClash.app` 仍为运行中的 0.7.0，未替换、未中断其代理。新版首次安装后台服务需要用户在 macOS 管理员窗口确认；root 服务实际安装、连续开关、重开应用及重启后的免重复授权尚待实机验收，不以编译和自动化测试替代。
+- 本地 ad-hoc 重新构建 / 更新会改变客户端签名，安装新版时可能重新授权一次；系统设置撤销后台权限后需重新允许。已有服务暂不可用时不通过重复提权修复。

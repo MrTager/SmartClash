@@ -12,12 +12,15 @@ struct NodesView: View {
         }, latencies: store.latencies, order: sort)
     }
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("节点与延迟").font(.largeTitle.bold())
                 Spacer()
                 TextField("搜索节点", text: $query).frame(width: 200)
             }
+            TrafficRateBar(traffic: store.traffic)
+            NetworkGlobePanel(activity: store.activity, nodes: store.visualizationNodes, trace: store.activeTrace, compact: true)
             HStack {
                 Picker("排序", selection: $sort) {
                     ForEach(NodeSortOrder.allCases) { Text($0.rawValue).tag($0) }
@@ -25,20 +28,17 @@ struct NodesView: View {
                 Text("\(visible.count) 个节点").foregroundStyle(.secondary)
                 Spacer()
                 if store.isTestingLatency {
-                    Text("\(store.latencyCompleted)/\(store.latencyTotal)").monospacedDigit()
+                    Text("后台测速 · \(store.latencyCompleted)/\(store.latencyTotal)").monospacedDigit().foregroundStyle(.secondary)
                     Button("取消测速") { store.cancelLatencyTest() }
-                } else {
-                    Button("全部测速") { store.beginLatencyTest() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.busy || store.recovery || store.nodes.isEmpty)
                 }
+                Button("全部测速") { store.beginLatencyTest() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.recovery || store.nodes.isEmpty)
             }
-            if store.isTestingLatency {
-                ProgressView(value: Double(store.latencyCompleted), total: Double(max(1, store.latencyTotal)))
-            }
-            Text("测试节点完成 HTTPS 请求的延迟，6 路并发、单次最多 5 秒；不会切换当前业务出口或开启系统代理 / TUN。")
+            Text("测速在后台进行，保留已有结果，完成后自动更新。6 路并发、单次最多 5 秒；不会切换当前业务出口或开启系统代理 / TUN。")
                 .font(.caption).foregroundStyle(.secondary)
-            List(visible) { node in
+            LazyVStack(spacing: 0) {
+            ForEach(visible) { node in
                 HStack(spacing: 12) {
                     Image(systemName: node.name == store.selected ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(node.name == store.selected ? .green : .secondary)
@@ -55,20 +55,21 @@ struct NodesView: View {
                     latency(node)
                         .frame(minWidth: 105, alignment: .trailing)
                     Button("测速") { store.beginLatencyTest([node]) }
-                        .disabled(store.busy || store.isTestingLatency || store.recovery)
+                        .disabled(store.recovery)
                     Button("选择") { store.perform { try await store.selectVerified(node) } }
-                        .disabled(store.busy || !store.running || store.isTestingLatency)
+                        .disabled(!store.running)
                 }.padding(.vertical, 7)
+                Divider()
+            }
             }
             Text("可达节点按延迟从低到高排序，未测与失败节点靠后。延迟不是下载速度，也不代表 OpenAI / ChatGPT 的地区资格。")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        }
     }
     @ViewBuilder
     private func latency(_ node: ProxyNode) -> some View {
-        if store.testingNodeIDs.contains(node.id) {
-            Text("等待 / 测试中").foregroundStyle(.secondary).font(.caption)
-        } else if let sample = store.latencies[node.id] {
+        if let sample = store.latencies[node.id] {
             if let ms = sample.milliseconds, sample.reachable {
                 Text("\(ms) ms").monospacedDigit().foregroundStyle(ms < 1000 ? Color.green : Color.orange)
                     .accessibilityLabel("HTTPS 延迟 \(ms) 毫秒")

@@ -10,6 +10,7 @@ enum LatencyTester {
     static func run(_ nodes: [LatencyRequest], concurrency: Int = 6,
                     probe: @escaping @Sendable (LatencyRequest) async -> NodeLatency,
                     receive: @escaping @MainActor (String, NodeLatency) -> Void) async {
+        guard !Task.isCancelled else { return }
         await withTaskGroup(of: (String, NodeLatency).self) { group in
             var iterator = nodes.makeIterator()
             for _ in 0..<min(max(1, concurrency), nodes.count) {

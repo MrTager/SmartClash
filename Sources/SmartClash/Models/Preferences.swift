@@ -6,6 +6,7 @@ struct Preferences: Codable {
     var automatic: Bool = true
     var exploreMultihop: Bool? = false
     var routingMode: RoutingMode? = .lowLatency
+    var trafficMode: TrafficMode? = .rule
     var chain: ChainOptions? = nil
     var secret: String = UUID().uuidString + UUID().uuidString
     var subscriptionToken: String = UUID().uuidString

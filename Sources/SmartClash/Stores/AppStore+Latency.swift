@@ -16,21 +16,19 @@ extension AppStore {
         await LatencyTester.run(targets.map { LatencyRequest(id: $0.id, name: $0.name) }, probe: { request in
             await client.delay(request.name)
         }, receive: { [weak self] id, result in
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             self.latencies[id] = result
-            self.testingNodeIDs.remove(id)
             if self.isTestingLatency { self.latencyCompleted += 1 }
         })
     }
     func beginLatencyTest(_ targets: [ProxyNode]? = nil) {
-        guard !busy, !isTestingLatency, !recovery else { return }
+        guard !recovery else { return }
         let targets = targets ?? nodes
         guard !targets.isEmpty else { error = "请先添加并更新订阅"; return }
-        isTestingLatency = true; latencyCompleted = 0; latencyTotal = targets.count
-        testingNodeIDs = Set(targets.map(\.id))
-        latencyTask = Task { [weak self] in
+        latencyTask = perform { [weak self] in
             guard let self else { return }
-            defer { self.isTestingLatency = false; self.testingNodeIDs.removeAll() }
+            self.isTestingLatency = true; self.latencyCompleted = 0; self.latencyTotal = targets.count
+            defer { self.isTestingLatency = false }
             do {
                 if !self.running {
                     try await self.start(purpose: .latencyTest)
@@ -43,7 +41,7 @@ extension AppStore {
             } catch is CancellationError {
                 self.log("延迟测试已取消")
             } catch {
-                self.error = error.localizedDescription
+                if !Task.isCancelled { self.error = error.localizedDescription }
             }
         }
     }

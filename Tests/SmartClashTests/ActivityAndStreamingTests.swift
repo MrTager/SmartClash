@@ -13,7 +13,7 @@ final class ActivityAndStreamingTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
     }
     @MainActor
-    func testOnlyForegroundWorkOwnsBusyState() async throws {
+    func testBackgroundMonitoringDoesNotOwnOperationState() async throws {
         let store = AppStore(loadFromDisk: false)
         XCTAssertFalse(store.busy)
         store.publishRoute(); store.logBackground("background fixture")
@@ -21,6 +21,61 @@ final class ActivityAndStreamingTests: XCTestCase {
         store.perform { try await Task.sleep(nanoseconds: 30_000_000) }
         XCTAssertTrue(store.busy)
         try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(store.busy)
+    }
+    @MainActor
+    func testNewActionCancelsPreviousAndWaitsForItsCleanup() async throws {
+        let store = AppStore(loadFromDisk: false)
+        var events: [String] = []
+        store.perform {
+            events.append("started")
+            do { try await Task.sleep(nanoseconds: 5_000_000_000) }
+            catch {
+                await Task.detached { try? await Task.sleep(nanoseconds: 30_000_000) }.value
+                events.append("cleaned up")
+                throw error
+            }
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let next = store.perform {
+            XCTAssertTrue(store.busy, "Old cleanup must not clear the new operation's state")
+            events.append("replacement")
+        }
+        await next.value
+        XCTAssertEqual(events, ["started", "cleaned up", "replacement"])
+        XCTAssertNil(store.error)
+        XCTAssertFalse(store.busy)
+    }
+    @MainActor
+    func testActionRequestedWhileStoppingWaitsForNetworkRestoration() async throws {
+        let store = AppStore(loadFromDisk: false)
+        store.running = true
+        store.perform { try await Task.sleep(nanoseconds: 5_000_000_000) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        store.requestStop()
+        var executed = false
+        let next = store.perform {
+            XCTAssertFalse(store.stopping)
+            XCTAssertFalse(store.running)
+            executed = true
+        }
+        await next.value
+        XCTAssertTrue(executed)
+        XCTAssertFalse(store.busy)
+        XCTAssertNil(store.error)
+    }
+    @MainActor
+    func testRepeatedStopAlsoCancelsQueuedActions() async throws {
+        let store = AppStore(loadFromDisk: false)
+        store.perform { try await Task.sleep(nanoseconds: 5_000_000_000) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        store.requestStop()
+        var executed = false
+        let queued = store.perform { executed = true }
+        store.requestStop()
+        await queued.value
+        XCTAssertFalse(executed)
+        XCTAssertFalse(store.stopping)
         XCTAssertFalse(store.busy)
     }
     @MainActor

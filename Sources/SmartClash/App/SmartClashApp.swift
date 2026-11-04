@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ProxyLogic
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
@@ -24,16 +25,28 @@ struct SmartClashApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("代理") {
+                ForEach(TrafficMode.allCases) { mode in
+                    Button("\(store.trafficMode == mode ? "✓ " : "")\(mode.title)") {
+                        store.perform { try await store.changeTrafficMode(mode) }
+                    }.disabled(store.recovery || store.stopping)
+                }
+                Divider()
                 Button("切换系统代理") { store.perform { try await store.toggleSystem() } }
-                    .keyboardShortcut("p", modifiers: [.command, .shift]).disabled(store.busy || store.recovery)
-                Button("停止并恢复网络") { store.requestStop() }.disabled(store.stopping)
+                    .keyboardShortcut("p", modifiers: [.command, .shift]).disabled(store.recovery)
+                Button("停止并恢复网络") { store.requestStop() }
             }
         }
         MenuBarExtra("SmartClash", systemImage: store.running ? "network.badge.shield.half.filled" : "network") {
-            Text(store.running ? "代理运行中" : "代理已停止")
-            Button(store.systemProxy ? "关闭系统代理" : "开启系统代理") { store.perform { try await store.toggleSystem() } }.disabled(store.busy || store.recovery)
-            Button(store.tun ? "关闭 TUN" : "开启 TUN") { store.perform { try await store.toggleTun() } }.disabled(store.busy || store.recovery)
-            Button("停止并恢复网络") { store.requestStop() }.disabled(store.stopping)
+            Text(store.running ? "内核运行中 · \(store.trafficMode.title)" : "代理已停止")
+            ForEach(TrafficMode.allCases) { mode in
+                Button("\(store.trafficMode == mode ? "✓ " : "")\(mode.title)") {
+                    store.perform { try await store.changeTrafficMode(mode) }
+                }.disabled(store.recovery || store.stopping)
+            }
+            Divider()
+            Button(store.systemProxy ? "关闭系统代理" : "开启系统代理") { store.perform { try await store.toggleSystem() } }.disabled(store.recovery)
+            Button(store.tun ? "关闭 TUN" : "开启 TUN") { store.perform { try await store.toggleTun() } }.disabled(store.recovery)
+            Button("停止并恢复网络") { store.requestStop() }
             Divider()
             OpenWindowButton()
             Button("退出") { NSApp.terminate(nil) }

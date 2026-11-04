@@ -13,6 +13,20 @@ private actor ProbeCounter {
 
 final class LatencyTesterTests: XCTestCase {
     @MainActor
+    func testAlreadyCancelledTestDoesNotStartAnyProbes() async {
+        let counter = ProbeCounter()
+        let task = Task {
+            await LatencyTester.run([LatencyRequest(id: "test", name: "test")], probe: { _ in
+                await counter.begin()
+                return NodeLatency(milliseconds: 15)
+            }, receive: { _, _ in XCTFail("Cancelled test must not publish results") })
+        }
+        task.cancel()
+        await task.value
+        let counts = await counter.snapshot()
+        XCTAssertEqual(counts.2, 0)
+    }
+    @MainActor
     func testBoundedConcurrencyAndEveryResultArrives() async {
         let counter = ProbeCounter()
         let nodes = (0..<20).map { LatencyRequest(id: String($0), name: "test") }

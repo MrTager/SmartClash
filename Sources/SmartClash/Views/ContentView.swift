@@ -7,7 +7,7 @@ struct ContentView: View {
     @State private var section: String? = "概览"
     @State private var sourceName = ""
     @State private var sourceURL = ""
-    private let sections = [("概览", "network"), ("订阅聚合", "square.stack.3d.up"), ("链式代理", "link"), ("节点", "point.3.connected.trianglepath.dotted"), ("事件日志", "list.bullet.rectangle")]
+    private let sections = [("概览", "network"), ("订阅聚合", "square.stack.3d.up"), ("链式代理", "link"), ("节点", "point.3.connected.trianglepath.dotted"), ("实时流量", "chart.xyaxis.line"), ("事件日志", "list.bullet.rectangle")]
     var body: some View {
         NavigationSplitView {
             List(selection: $section) {
@@ -16,6 +16,8 @@ struct ContentView: View {
             .navigationTitle("SmartClash")
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 6) {
+                    SidebarTrafficStatus(traffic: store.traffic)
+                    Divider().padding(.vertical, 6)
                     Label("Intel · macOS", systemImage: "desktopcomputer")
                     Text("本地处理 · 私有订阅").font(.caption).foregroundStyle(.secondary)
                 }.padding()
@@ -26,6 +28,7 @@ struct ContentView: View {
                 case "订阅聚合": subscriptions
                 case "链式代理": ChainView().environmentObject(store)
                 case "节点": NodesView().environmentObject(store)
+                case "实时流量": trafficPage
                 case "事件日志": eventLog
                 default: overview
                 }
@@ -33,9 +36,8 @@ struct ContentView: View {
             .padding(24)
             .navigationTitle(section ?? "概览")
             .toolbar {
-                if store.busy { ProgressView().controlSize(.small) }
                 Button { store.perform { try await store.refresh() } } label: { Label("更新订阅", systemImage: "arrow.clockwise") }
-                    .disabled(store.busy || store.isTestingLatency || store.tun || store.preferences.sources.isEmpty)
+                    .disabled(store.tun || store.preferences.sources.isEmpty)
             }
         }
         .frame(minWidth: 940, minHeight: 650)
@@ -49,10 +51,13 @@ struct ContentView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("让连接持续在线").font(.largeTitle.bold())
-                        Button(store.running || store.busy ? "停止并恢复网络" : "一键打通") {
+                        Button(store.stopping ? "正在恢复网络…" : (store.running || store.busy ? "停止并恢复网络" : "一键打通")) {
                             if store.running || store.busy { store.requestStop() }
                             else { store.perform { try await store.oneClickConnect() } }
-                        }.buttonStyle(.borderedProminent).disabled(store.stopping)
+                        }.buttonStyle(.borderedProminent)
+                        if store.busy && !store.stopping {
+                            Text("正在后台处理，可随时停止或执行其他操作").font(.caption).foregroundStyle(.secondary)
+                        }
                         Text("聚合节点，监测 OpenAI API，自动寻找可用出口。")
                             .foregroundStyle(.secondary)
                         Text(store.internetStatus).font(.caption).foregroundStyle(.secondary)
@@ -69,15 +74,18 @@ struct ContentView: View {
                         HStack {
                             Label("检测到未恢复的网络设置", systemImage: "exclamationmark.triangle")
                             Spacer()
-                            Button("恢复网络") { store.requestStop() }.disabled(store.stopping)
+                            Button("恢复网络") { store.requestStop() }
                         }.padding(8)
                     }
                 }
+                TrafficRateBar(traffic: store.traffic)
+                NetworkGlobePanel(activity: store.activity, nodes: store.visualizationNodes, trace: store.activeTrace)
                 HStack(spacing: 16) {
                     metric("聚合节点", value: "\(store.nodes.count)", icon: "square.stack.3d.up")
                     metric("内核状态", value: store.running ? "运行中" : "已停止", icon: "power")
-                    metric("当前出口", value: store.selected.isEmpty ? "尚未连接" : store.selected, icon: "location")
+                    metric("当前出口", value: store.trafficMode == .direct ? "直连" : (store.selected.isEmpty ? "尚未连接" : store.selected), icon: "location")
                 }
+                TrafficModeControls().environmentObject(store)
                 RoutingModeControls().environmentObject(store)
                 TrafficPanel(traffic: store.traffic)
                 GroupBox("代理控制") {
@@ -88,30 +96,41 @@ struct ContentView: View {
                             Text(store.systemProxy ? "已开启" : "已关闭").foregroundStyle(.secondary)
                             Button(store.systemProxy ? "关闭" : "一键开启") {
                                 store.perform { try await store.toggleSystem() }
-                            }.disabled(store.busy || store.recovery)
+                            }.disabled(store.recovery)
                         }
                         Divider()
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
                                 Label("TUN 虚拟网卡", systemImage: "externaldrive.connected.to.line.below")
-                                Text("接管更多应用流量，开启与关闭需管理员授权。")
+                                Text("首次授权安装后台服务，之后开关无需重复授权。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Button(store.tun ? "关闭 TUN" : "一键开启 TUN") {
                                 store.perform { try await store.toggleTun() }
-                            }.disabled(store.busy || store.recovery)
+                            }.disabled(store.recovery)
                         }
                         Divider()
                         HStack {
                             Button(store.running || store.busy ? "停止内核并恢复网络" : "仅启动内核") {
                                 if store.running || store.busy { store.requestStop() }
                                 else { store.perform { try await store.start() } }
-                            }.disabled(store.stopping || (!store.running && store.recovery))
+                            }.disabled(!store.running && !store.busy && store.recovery)
                             Spacer()
                             Text("HTTP / SOCKS · 127.0.0.1:17890").font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
                     }.padding(12)
+                    HStack {
+                        Text("系统代理与 TUN 共用一次授权；重开应用和重启电脑后继续有效。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("配置一次授权") {
+                            store.perform {
+                                try await PrivilegedClient.shared.prepare()
+                                store.log("后台服务已就绪，系统代理与 TUN 开关无需重复授权")
+                            }
+                        }
+                    }.padding(.horizontal, 12).padding(.bottom, 8)
                 }
                 GroupBox("智能切换") {
                     VStack(alignment: .leading, spacing: 15) {
@@ -126,7 +145,7 @@ struct ContentView: View {
                                 .onChange(of: store.preferences.interval) { _ in store.savePreferences() }
                             Spacer()
                             Button("立即检测 / 故障切换") { store.perform { try await store.inspectCurrent(force: true) } }
-                                .disabled(!store.running || store.busy)
+                                .disabled(!store.running)
                         }
                         Text("连续失败 2 次触发切换，切换冷却 30 秒。限流与不确定结果不触发切换。检测不重叠，实际周期包含请求耗时；推荐 1 分钟。")
                             .font(.caption).foregroundStyle(.secondary)
@@ -146,6 +165,17 @@ struct ContentView: View {
             }.frame(maxWidth: .infinity, minHeight: 70, alignment: .leading).padding(8)
         }
     }
+    private var trafficPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("实时流量").font(.largeTitle.bold())
+                Text("每秒刷新当前代理的上传、下载速度和活跃连接。")
+                    .foregroundStyle(.secondary)
+                TrafficPanel(traffic: store.traffic, chartHeight: 220)
+                NetworkGlobePanel(activity: store.activity, nodes: store.visualizationNodes, trace: store.activeTrace)
+            }
+        }
+    }
     private var subscriptions: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("多个订阅，一个入口").font(.largeTitle.bold())
@@ -156,8 +186,10 @@ struct ContentView: View {
                     TextField("名称", text: $sourceName).frame(width: 130)
                     SecureField("HTTPS 订阅链接", text: $sourceURL)
                     Button("添加") {
-                        do { try store.addSource(name: sourceName, url: sourceURL); sourceName = ""; sourceURL = "" }
-                        catch { store.error = error.localizedDescription }
+                        let name = sourceName, url = sourceURL
+                        store.perform {
+                            try store.addSource(name: name, url: url); sourceName = ""; sourceURL = ""
+                        }
                     }.disabled(!store.canChangeSources || sourceURL.isEmpty)
                 }.padding(8)
             }
@@ -171,7 +203,7 @@ struct ContentView: View {
                             Text(source.isLocal ? "本地配置 · 离线快照" : (URL(string: source.url)?.host ?? "HTTPS 订阅")).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("删除", role: .destructive) { store.removeSource(source) }
+                        Button("删除", role: .destructive) { store.perform { store.removeSource(source) } }
                             .disabled(!store.canChangeSources)
                     }.padding(.vertical, 7)
                 }

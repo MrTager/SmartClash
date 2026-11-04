@@ -11,13 +11,13 @@ struct RoutingModeControls: View {
                     store.preferences.routingMode = $0; store.savePreferences()
                 })) {
                     ForEach(RoutingMode.allCases) { Text($0.title).tag($0) }
-                }.pickerStyle(.segmented).disabled(store.busy || store.stopping)
+                }.pickerStyle(.segmented)
                 Text((store.preferences.routingMode ?? .lowLatency).explanation).font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Text("当前生效：\(store.activeMode?.title ?? "尚未连接")").font(.caption)
+                    Text(store.trafficMode == .direct ? "当前生效：直连（代理选路暂停）" : "当前生效：\(store.activeMode?.title ?? "尚未连接")").font(.caption)
                     Spacer()
                     Button("按此模式重新选路") { store.perform { try await store.applyRoutingMode() } }
-                        .disabled(!store.running || store.busy || store.isTestingLatency || store.stopping)
+                        .disabled(!store.running || store.trafficMode == .direct)
                 }
                 if let node = store.nodeListNodes.first(where: { $0.name == store.selected }) {
                     HStack(spacing: 20) {
