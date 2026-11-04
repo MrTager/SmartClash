@@ -23,12 +23,16 @@ windows/
 ├─ Cargo.toml
 ├─ build.ps1                 # 编译 + 组装 dist + 打包 zip
 ├─ fetch-core.ps1            # 下载 / 校验 Mihomo Windows 内核（二进制不入库）
+├─ tools/
+│  └─ make_icon.py           # 从品牌图生成 app.ico 与窗口图标源码（纯标准库）
 ├─ resources/
+│  ├─ app.ico                # 应用图标（16~256 多尺寸，含 PNG 大图）
 │  ├─ mihomo.exe             # Mihomo 内核（Windows amd64）
 │  ├─ wintun.dll             # TUN 虚拟网卡驱动
 │  └─ world-land.json        # Natural Earth 简化陆地轮廓（全球节点视图）
 └─ src/
    ├─ main.rs                # 入口 / 窗口 / 字体 / 动作分发
+   ├─ app_icon.rs            # 由 tools/make_icon.py 生成的窗口图标位图
    ├─ logic/                 # 纯逻辑（从 ProxyLogic 移植）
    │  ├─ model.rs            # 数据模型、偏好设置
    │  ├─ subscription.rs     # Clash YAML 解析、去重指纹、安全校验
@@ -87,10 +91,25 @@ cd windows
 
 产物：
 
-- `windows/dist/SmartClash-Windows-0.8.0/` —— 免安装目录
-- `windows/dist/SmartClash-Windows-0.8.0.zip` —— 绿色压缩包
+- `windows/dist/SmartClash-Windows-0.8.1/` —— 免安装目录
+- `windows/dist/SmartClash-Windows-0.8.1.zip` —— 绿色压缩包
 
 直接运行目录中的 `SmartClash.exe` 即可。
+
+## 图标与版本信息
+
+exe 的图标、文件属性（`FileDescription` / `ProductName` / `FileVersion` / `Copyright`）由 `build.rs` 通过 `resources/app.ico` 写入，资源编译使用 mingw 的 `windres`（MSVC 工具链则是 `rc.exe`）。缺少资源编译器时只打印警告、不中断构建，只是 exe 没有图标。
+
+图标沿用 macOS 版的品牌图形（蓝色圆角方块 + 白色 S 形线路与三个节点），由脚本从原图重采样生成，不手工维护位图：
+
+```powershell
+cd windows
+python tools\make_icon.py     # 输出 resources/app.ico、resources/app-64.png、src/app_icon.rs
+```
+
+- 尺寸覆盖 16/20/24/32/40/48/64/96/128/256，128 与 256 用 PNG 压缩，其余是 32 位 DIB，兼顾体积与清晰度；
+- 重采样在预乘 alpha 的线性光空间做面积平均，小尺寸不会发灰或偏暗；
+- `src/app_icon.rs` 是 64×64 的 RGBA 常量，供 `ViewportBuilder::with_icon` 设置窗口/任务栏图标（`build.rs` 只负责 exe 静态图标，两者并用）。
 
 ## 与 macOS 版的差异（请务必知悉）
 

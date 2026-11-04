@@ -2,7 +2,7 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Version = "0.8.0"
+$Version = "0.8.1"
 $DistRoot = Join-Path $Root "dist"
 $Dist = Join-Path $DistRoot "SmartClash-Windows-$Version"
 $Zip = Join-Path $DistRoot "SmartClash-Windows-$Version.zip"

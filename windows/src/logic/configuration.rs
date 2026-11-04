@@ -238,8 +238,12 @@ proxies:
     }
 
     fn check_with_core(config: &[u8], label: &str) {
+        // 同一进程内多个测试会并行调用这里，label 可能重复（如 direct），
+        // 因此再加一个自增序号，避免共用临时目录互相删目录。
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "smartclash-config-test-{}-{label}",
+            "smartclash-config-test-{}-{label}-{seq}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_icon;
 mod logic;
 mod services;
 mod state;
@@ -14,7 +15,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 780.0])
             .with_min_inner_size([940.0, 650.0])
-            .with_title("SmartClash"),
+            .with_title("SmartClash")
+            .with_icon(egui::IconData {
+                rgba: app_icon::RGBA.to_vec(),
+                width: app_icon::SIDE,
+                height: app_icon::SIDE,
+            }),
         ..Default::default()
     };
     eframe::run_native(
