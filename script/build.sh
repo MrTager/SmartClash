@@ -4,24 +4,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 [[ "$(uname -s)" == Darwin ]] || { echo '请在 macOS 上运行，需要 Xcode / Command Line Tools。' >&2; exit 1; }
 xcrun --find swift >/dev/null
+bash script/build_icon.sh
 if [[ ! -x Resources/mihomo ]]; then bash script/fetch_core.sh; fi
 swift test --arch x86_64
 swift build --arch x86_64 -c release
 BIN_DIR="$(swift build --arch x86_64 -c release --show-bin-path)"
 APP_BUNDLE="$ROOT_DIR/dist/SmartClash.app"
-# A running app must restore network settings through its regular quit handler.
-if pgrep -x SmartClash >/dev/null; then
-  osascript -e 'tell application id "com.smartclash.app" to quit'
-  for ((i=0; i<60; i++)); do
-    if ! pgrep -x SmartClash >/dev/null; then break; fi
-    sleep 1
-  done
-  if pgrep -x SmartClash >/dev/null; then echo '请先在客户端停止代理并正常退出。' >&2; exit 1; fi
+# Never interrupt the installed client just to build a separate dist bundle.
+if pgrep -x SmartClash >/dev/null && /usr/sbin/lsof -a -c SmartClash -d txt -Fn 2>/dev/null | /usr/bin/grep -Fx "n$APP_BUNDLE/Contents/MacOS/SmartClash" >/dev/null; then
+  echo 'dist 中的应用正在运行，请先正常退出该副本再构建；不会自动中断网络。' >&2; exit 1
 fi
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_DIR/SmartClash" "$APP_BUNDLE/Contents/MacOS/SmartClash"
 cp Resources/mihomo "$APP_BUNDLE/Contents/Resources/mihomo"
+cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp LICENSE THIRD_PARTY_NOTICES.md "$APP_BUNDLE/Contents/Resources/"
 YAMS_SOURCE="$ROOT_DIR/.build/checkouts/Yams"
 if [[ ! -d "$YAMS_SOURCE" ]]; then YAMS_SOURCE="$ROOT_DIR/.build/checkouts/yams"; fi
@@ -44,8 +41,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>SmartClash</string>
 <key>CFBundleDisplayName</key><string>SmartClash</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -61,5 +59,5 @@ else
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 fi
 codesign --verify --deep --strict "$APP_BUNDLE"
-lipo -verify_arch x86_64 "$APP_BUNDLE/Contents/MacOS/SmartClash"
+lipo "$APP_BUNDLE/Contents/MacOS/SmartClash" -verify_arch x86_64
 echo "已构建：$APP_BUNDLE"

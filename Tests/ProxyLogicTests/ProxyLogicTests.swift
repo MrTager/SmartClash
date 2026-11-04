@@ -71,6 +71,35 @@ final class ProxyLogicTests: XCTestCase {
         XCTAssertThrowsError(try SubscriptionParser.parse("vmess://abcdef", source: source))
         XCTAssertThrowsError(try SubscriptionParser.parse(fixture.replacingOccurrences(of: "type: ss", with: "type: unknown"), source: source))
     }
+    func testLegacyWebSocketFieldsNormalizeAndDeduplicate() throws {
+        let legacy = """
+        proxies:
+          - name: WS
+            type: vmess
+            server: example.com
+            port: 443
+            uuid: 00000000-0000-0000-0000-000000000001
+            network: ws
+            ws-path: /legacy
+            ws-headers: {Host: example.com}
+        """
+        let nodes = try SubscriptionParser.parse(legacy, source: source)
+        let options = try XCTUnwrap(nodes[0].payload["ws-opts"] as? [String: Any])
+        XCTAssertEqual(options["path"] as? String, "/legacy")
+        XCTAssertNil(nodes[0].payload["ws-path"])
+        XCTAssertNil(nodes[0].payload["ws-headers"])
+        let modern = legacy.replacingOccurrences(of: "ws-path: /legacy\n    ws-headers: {Host: example.com}",
+            with: "ws-opts: {path: /legacy, headers: {Host: example.com}}")
+        let current = try SubscriptionParser.parse(modern, source: source)
+        XCTAssertEqual(nodes[0].id, current[0].id)
+    }
+    func testBuiltInObfsIsAcceptedButExternalPluginsRemainRejected() throws {
+        let obfs = fixture.replacingOccurrences(of: "password: test-password",
+            with: "password: test-password\n    plugin: obfs\n    plugin-opts: {mode: tls, host: example.com}")
+        XCTAssertEqual(try SubscriptionParser.parse(obfs, source: source).first?.payload["plugin"] as? String, "obfs")
+        XCTAssertThrowsError(try SubscriptionParser.parse(obfs.replacingOccurrences(of: "plugin: obfs", with: "plugin: /tmp/run"), source: source))
+        XCTAssertThrowsError(try SubscriptionParser.parse(obfs.replacingOccurrences(of: "host: example.com", with: "path: /tmp/run"), source: source))
+    }
     func testParserErrorsDoNotLeakCredentials() {
         do { _ = try SubscriptionParser.parse("password: [TOP-SECRET", source: source); XCTFail("Expected failure") }
         catch { XCTAssertFalse(error.localizedDescription.contains("TOP-SECRET")) }
@@ -99,5 +128,12 @@ final class ProxyLogicTests: XCTestCase {
     }
     func testEmptyRuntimeConfigurationRejected() {
         XCTAssertThrowsError(try Configuration.make(nodes: [], secret: "test", tun: false))
+    }
+    func testSerializedConfigurationDoesNotUseJSONOnlySlashEscapes() throws {
+        let nodes = try SubscriptionParser.parse(fixture.replacingOccurrences(of: "name: Test", with: "name: Test/Slash"), source: source)
+        for data in [try Configuration.make(nodes: nodes, secret: "test", tun: false), try Configuration.export(nodes: nodes)] {
+            XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("\\/"))
+            XCTAssertNotNil(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
     }
 }

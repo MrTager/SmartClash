@@ -1,17 +1,18 @@
 import Foundation
 import ProxyLogic
-final class CoreClient {
+final class CoreClient: @unchecked Sendable {
     let secret: String
     private let session: URLSession
-    init(secret: String) {
+    init(secret: String, session suppliedSession: URLSession? = nil) {
         self.secret = secret
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = [:]; config.timeoutIntervalForRequest = 4
-        session = URLSession(configuration: config)
+        session = suppliedSession ?? URLSession(configuration: config)
     }
     @discardableResult
-    func request(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> [String: Any] {
+    func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 4) async throws -> [String: Any] {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:\(Configuration.controllerPort)\(path)")!)
+        req.timeoutInterval = timeout
         req.httpMethod = method; req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: req)
@@ -23,16 +24,66 @@ final class CoreClient {
     func select(_ name: String, group: String) async throws {
         try await request("/proxies/\(group)", method: "PUT", body: ["name": name])
     }
+    func delay(_ name: String, timeout: Int = 5000) async -> NodeLatency {
+        do {
+            let response = try await request(DelayEndpoint.path(name: name, timeout: timeout), timeout: Double(timeout) / 1000 + 2)
+            guard let milliseconds = response["delay"] as? Int, milliseconds >= 0 else {
+                return NodeLatency(milliseconds: nil, failure: "未返回有效延迟")
+            }
+            return NodeLatency(milliseconds: milliseconds)
+        } catch {
+            return NodeLatency(milliseconds: nil, failure: Task.isCancelled ? "已取消" : "超时或不可达")
+        }
+    }
+    func internetProbe(port: Int) async throws -> ProbeResult {
+        let start = Date()
+        let result = try await Command.run("/usr/bin/curl", ["--silent", "--show-error", "--noproxy", "", "--proxy", "http://127.0.0.1:\(port)",
+            "--connect-timeout", "3", "--max-time", "6", "--output", "/dev/null", "--write-out", "%{http_code}",
+            "--header", "Cache-Control: no-cache", DelayEndpoint.target], cancellable: true)
+        return InternetPolicy.classify(code: result.code == 0 ? (Int(result.text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) : 0,
+            elapsed: Int(Date().timeIntervalSince(start) * 1000))
+    }
     func probe(port: Int) async throws -> ProbeResult {
         let start = Date()
         // curl uses a dedicated HTTP proxy listener, TLS verification stays enabled, no redirects.
         let r = try await Command.run("/usr/bin/curl", ["--silent", "--show-error", "--noproxy", "", "--proxy", "http://127.0.0.1:\(port)",
             "--connect-timeout", "4", "--max-time", "8", "--max-filesize", "131072", "--write-out", "\n%{http_code}",
-            "--header", "Cache-Control: no-cache", "https://api.openai.com/v1/models"])
+            "--header", "Cache-Control: no-cache", "https://api.openai.com/v1/models"], cancellable: true)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         guard r.code == 0, let cut = r.text.lastIndex(of: "\n"), let code = Int(r.text[r.text.index(after: cut)...]) else {
             return ProbeResult(health: .offline, milliseconds: ms, detail: "连接失败 / TLS 错误 / 超时")
         }
         return HealthPolicy.classify(code: code, body: String(r.text[..<cut]), elapsed: ms)
+    }
+    func throughput(port: Int) async throws -> ThroughputSample? {
+        let result = try await Command.run("/usr/bin/curl", ["--silent", "--show-error", "--noproxy", "", "--proxy", "http://127.0.0.1:\(port)",
+            "--connect-timeout", "3", "--max-time", "10", "--max-filesize", "1048576", "--output", "/dev/null",
+            "--header", "Accept-Encoding: identity", "--write-out", "%{speed_download}\n%{size_download}\n%{http_code}",
+            "https://speed.cloudflare.com/__down?bytes=1048576"], cancellable: true)
+        let fields = result.text.components(separatedBy: .newlines)
+        guard result.code == 0, fields.count == 3, fields[2] == "200", let speed = Double(fields[0]), speed > 0,
+              let bytes = Double(fields[1]), bytes >= 1_048_576 else { return nil }
+        return ThroughputSample(bytesPerSecond: speed, downloadedBytes: Int(bytes))
+    }
+    func trafficStream() -> AsyncThrowingStream<TrafficSample, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var request = URLRequest(url: URL(string: "http://127.0.0.1:\(Configuration.controllerPort)/traffic")!)
+                    request.timeoutInterval = 86_400
+                    request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
+                        throw ProxyError.message("无法读取内核流量统计")
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        if let sample = try? JSONDecoder().decode(TrafficSample.self, from: Data(line.utf8)) { continuation.yield(sample) }
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }

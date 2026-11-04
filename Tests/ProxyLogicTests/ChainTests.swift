@@ -21,7 +21,7 @@ final class ChainTests: XCTestCase {
         let doc = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let groups = try XCTUnwrap(doc["proxy-groups"] as? [[String: Any]])
         XCTAssertEqual(groups[0]["proxies"] as? [String], routes.map(\.name))
-        XCTAssertEqual(groups[1]["proxies"] as? [String], routes.map(\.name))
+        XCTAssertEqual(groups[1]["proxies"] as? [String], routes.map(\.name) + raw.map(\.name))
         XCTAssertEqual((doc["proxies"] as? [[String: Any]])?.count, 5)
     }
     func testNoSelfLoop() throws {
@@ -64,7 +64,7 @@ final class DynamicRouterTests: XCTestCase {
     }
     func testVariableDepthAndNoCycles() throws {
         let raw = try pool(); let plan = try DynamicRouter.plan(nodes: raw, round: 0)
-        let definitions = Dictionary((raw + plan.definitions).map { ($0.name, $0) })
+        let definitions = Dictionary(uniqueKeysWithValues: (raw + plan.definitions).map { ($0.name, $0) })
         var depths = Set<Int>()
         for candidate in plan.candidates {
             var current: String? = candidate.name; var seen = Set<String>(); var servers = Set<String>(); var depth = 0

@@ -7,8 +7,13 @@ public struct RoutePlan {
 }
 public enum DynamicRouter {
     // Search budget bounds work, not a fixed two/three-hop topology. Every round explores new paths.
-    public static func plan(nodes: [ProxyNode], round: Int, budget: Int = 12) throws -> RoutePlan {
+    public static func plan(nodes: [ProxyNode], round: Int, budget: Int = 12, allowChains: Bool = true) throws -> RoutePlan {
         guard !nodes.isEmpty, budget > 0 else { throw ProxyError.message("没有可探索的节点") }
+        if !allowChains {
+            let count = min(budget, nodes.count)
+            let offset = ((round % nodes.count) * count) % nodes.count
+            return RoutePlan(candidates: (0..<count).map { nodes[(offset + $0) % nodes.count] }, definitions: [])
+        }
         let tcp: Set<String> = ["ss", "vmess", "vless", "trojan", "socks5", "http", "snell", "anytls"]
         let pool = nodes.filter { tcp.contains($0.payload["type"] as? String ?? "") }
         var candidates: [ProxyNode] = []

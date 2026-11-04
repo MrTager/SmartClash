@@ -7,7 +7,6 @@ struct ContentView: View {
     @State private var section: String? = "概览"
     @State private var sourceName = ""
     @State private var sourceURL = ""
-    @State private var query = ""
     private let sections = [("概览", "network"), ("订阅聚合", "square.stack.3d.up"), ("链式代理", "link"), ("节点", "point.3.connected.trianglepath.dotted"), ("事件日志", "list.bullet.rectangle")]
     var body: some View {
         NavigationSplitView {
@@ -26,7 +25,7 @@ struct ContentView: View {
                 switch section ?? "概览" {
                 case "订阅聚合": subscriptions
                 case "链式代理": ChainView().environmentObject(store)
-                case "节点": nodeList
+                case "节点": NodesView().environmentObject(store)
                 case "事件日志": eventLog
                 default: overview
                 }
@@ -36,7 +35,7 @@ struct ContentView: View {
             .toolbar {
                 if store.busy { ProgressView().controlSize(.small) }
                 Button { store.perform { try await store.refresh() } } label: { Label("更新订阅", systemImage: "arrow.clockwise") }
-                    .disabled(store.busy || store.tun || store.preferences.sources.isEmpty)
+                    .disabled(store.busy || store.isTestingLatency || store.tun || store.preferences.sources.isEmpty)
             }
         }
         .frame(minWidth: 940, minHeight: 650)
@@ -50,25 +49,27 @@ struct ContentView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("让连接持续在线").font(.largeTitle.bold())
-                        Button(store.dynamicMode && store.running ? "停止并恢复网络" : "一键打通") {
-                            store.perform {
-                                if store.dynamicMode && store.running { try await store.stop() }
-                                else { try await store.oneClickConnect() }
-                            }
-                        }.buttonStyle(.borderedProminent).disabled(store.busy)
+                        Button(store.running || store.busy ? "停止并恢复网络" : "一键打通") {
+                            if store.running || store.busy { store.requestStop() }
+                            else { store.perform { try await store.oneClickConnect() } }
+                        }.buttonStyle(.borderedProminent).disabled(store.stopping)
                         Text("聚合节点，监测 OpenAI API，自动寻找可用出口。")
                             .foregroundStyle(.secondary)
+                        Text(store.internetStatus).font(.caption).foregroundStyle(.secondary)
+                        Text(store.openAIStatus).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Image(systemName: store.running ? "network.badge.shield.half.filled" : "network")
-                        .font(.system(size: 46)).foregroundStyle(store.running ? .green : .secondary)
+                    if let icon = AppArtwork.icon {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 76, height: 76)
+                            .accessibilityLabel("SmartClash 应用图标")
+                    }
                 }
                 if store.recovery {
                     GroupBox {
                         HStack {
                             Label("检测到未恢复的网络设置", systemImage: "exclamationmark.triangle")
                             Spacer()
-                            Button("恢复网络") { store.perform { try await store.stop() } }.disabled(store.busy)
+                            Button("恢复网络") { store.requestStop() }.disabled(store.stopping)
                         }.padding(8)
                     }
                 }
@@ -77,6 +78,8 @@ struct ContentView: View {
                     metric("内核状态", value: store.running ? "运行中" : "已停止", icon: "power")
                     metric("当前出口", value: store.selected.isEmpty ? "尚未连接" : store.selected, icon: "location")
                 }
+                RoutingModeControls().environmentObject(store)
+                TrafficPanel(traffic: store.traffic)
                 GroupBox("代理控制") {
                     VStack(spacing: 18) {
                         HStack {
@@ -101,9 +104,10 @@ struct ContentView: View {
                         }
                         Divider()
                         HStack {
-                            Button(store.running ? "停止内核并恢复网络" : "仅启动内核") {
-                                store.perform { if store.running { try await store.stop() } else { try await store.start() } }
-                            }.disabled(store.busy || store.recovery)
+                            Button(store.running || store.busy ? "停止内核并恢复网络" : "仅启动内核") {
+                                if store.running || store.busy { store.requestStop() }
+                                else { store.perform { try await store.start() } }
+                            }.disabled(store.stopping || (!store.running && store.recovery))
                             Spacer()
                             Text("HTTP / SOCKS · 127.0.0.1:17890").font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
@@ -111,7 +115,7 @@ struct ContentView: View {
                 }
                 GroupBox("智能切换") {
                     VStack(alignment: .leading, spacing: 15) {
-                        Toggle("OpenAI 不可用时自动切换节点", isOn: $store.preferences.automatic)
+                        Toggle("OpenAI 或网络不可用时自动切换节点", isOn: $store.preferences.automatic)
                             .onChange(of: store.preferences.automatic) { _ in store.savePreferences() }
                         HStack {
                             Text("检测间隔")
@@ -145,7 +149,7 @@ struct ContentView: View {
     private var subscriptions: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("多个订阅，一个入口").font(.largeTitle.bold())
-            Text("导入 Clash YAML / JSON 订阅，按节点配置去重。更新失败保留缓存。普通模式每小时更新，TUN 模式请停止后手动更新。")
+            Text("导入 Clash YAML / JSON 订阅，按节点配置去重。更新失败保留缓存，本地导入配置保留离线快照。普通模式每小时更新，TUN 模式请停止后手动更新。")
                 .foregroundStyle(.secondary)
             GroupBox("添加订阅") {
                 HStack {
@@ -164,7 +168,7 @@ struct ContentView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(source.name).fontWeight(.medium)
-                            Text(URL(string: source.url)?.host ?? "HTTPS 订阅").font(.caption).foregroundStyle(.secondary)
+                            Text(source.isLocal ? "本地配置 · 离线快照" : (URL(string: source.url)?.host ?? "HTTPS 订阅")).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Button("删除", role: .destructive) { store.removeSource(source) }
@@ -186,31 +190,6 @@ struct ContentView: View {
                     Text("链接仅当前 Mac 可访问，客户端需保持运行。导出内容含节点密码，请妥善保管。其他客户端应选择“直连”更新本机订阅。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
-            }
-        }
-    }
-    private var nodeList: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("节点与连通性").font(.largeTitle.bold())
-                Spacer(); TextField("搜索节点", text: $query).frame(width: 220)
-            }
-            Text("备用节点在故障切换时通过独立监听端口检测，不改变当前业务出口。")
-                .foregroundStyle(.secondary)
-            List(store.routeNodes.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }) { node in
-                HStack(spacing: 12) {
-                    Image(systemName: node.name == store.selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(node.name == store.selected ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(node.name).lineLimit(1)
-                        if let status = store.statuses[node.id] {
-                            Text("\(status.result.detail) · \(status.result.milliseconds) ms · \(status.checked.formatted(date: .omitted, time: .standard))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else { Text("尚未检测").font(.caption).foregroundStyle(.secondary) }
-                    }
-                    Spacer()
-                    Button("选择") { store.perform { try await store.select(node) } }.disabled(store.busy || !store.running)
-                }.padding(.vertical, 6)
             }
         }
     }

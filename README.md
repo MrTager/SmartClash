@@ -4,6 +4,8 @@
 
 **交付状态：源码实现版，尚未经过 macOS 编译和实机网络验收。当前生成环境为 Linux，没有 macOS SDK。此压缩包不是已验证的 DMG。** 首次使用请按照下面的步骤在 Mac 构建；编译通过、真实订阅、系统代理和 TUN 授权均需在 macOS 验证。
 
+**本机更新记录（2026-11-04，v0.4.1）优先于历史交付状态：** 已在 Intel macOS 完成构建与自动化测试；新增连接前 HTTPS 出网验证、节点延迟测试与排序。TUN 管理员授权与接管后的实机验证是独立验收项，不能以编译通过替代。
+
 ## 快速构建
 
 1. Mac 安装 Xcode 15+ 或 Swift 5.9+ Command Line Tools：`xcode-select --install`。Xcode 16.2 可以使用。
@@ -63,6 +65,25 @@ bash script/package.sh
 支持含 `proxies` 的 Clash YAML / JSON，常见 SS、SSR、VMess、VLESS、Trojan、Hysteria/2、TUIC、HTTP、SOCKS5、Snell、AnyTLS 节点。具体字段是否被当前内核接受，会在启动前进行 `mihomo -t` 校验。
 
 当前不支持 Base64 URI 列表（ss://、vmess:// 等）、仅有 proxy-providers 的远程配置、节点链引用、脚本/插件及依赖本地证书文件的节点。不会执行第三方订阅转换服务，也不会发送订阅给外部转换网站。若订阅服务能提供 Clash 格式，请选用其 Clash/Mihomo 订阅链接。
+
+本地兼容修正：支持将旧式 VMess WebSocket 的 `ws-path` / `ws-headers` 规范化为 `ws-opts`；允许 Mihomo 内建的 SS `obfs` 传输（仅 `http` / `tls` 模式与 `host` 参数），仍拒绝外部插件和本地文件引用。配置输出不转义 `/`，以兼容内核的 YAML 解析器。
+
+### 从本机 Clash Verge 导入全部配置
+
+先正常退出 SmartClash，然后执行：
+
+```bash
+swift run --arch x86_64 SmartClashImport --check
+swift run --arch x86_64 SmartClashImport --apply
+bash script/package.sh
+bash script/build_and_run.sh --install
+```
+
+导入器只读取用户级 Clash Verge `profiles.yaml` 以及对应的 `profiles/*.yaml`，不下载订阅、不访问其受保护系统目录、不改变系统代理或 TUN。来源数量由本机配置决定；所有 remote/local 配置均保留，各自缓存仅含 `proxies`。HTTPS 远程来源保留原更新地址，本地来源在更新时保留离线快照；若要再次导入原客户端中的本地修改，退出 SmartClash 后重新运行导入器。
+
+默认读取 `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev`，写入 `~/Library/Application Support/SmartClash`；可通过 `--source-directory` 和 `--destination` 指定其他目录。写入前先校验所有来源，已有且将被更新的 SmartClash 文件会备份至其数据目录中的 `pre-import-*` 私有目录。配置、缓存及备份含凭据，请勿提交到 Git。重复导入按原配置 UID 保留相同来源 ID，不会重复增加来源。
+
+`--install` 仅在 `/Applications/SmartClash.app` 尚不存在时安装并启动，避免直接覆盖已有应用。普通开发仍使用 `bash script/build_and_run.sh --verify`。
 
 正常模式手动/每小时更新订阅，更新失败保留该来源缓存。TUN 模式为避免普通 GUI 改写 root 配置，需先停止后手动更新。增删来源前需停止内核。首次添加后需手动更新。
 
@@ -137,3 +158,41 @@ bash script/build_and_run.sh --verify
 这实现的是“预热备用 + 自动快速切换新连接”，不是现有 TCP 会话迁移。API 探测最坏 8 秒超时、调度、配置更新和本地控制调用都影响实际故障发现及切换耗时，不能保证零中断。正在生成的响应、已建立的 WebSocket/TCP 仍可能失败，调用端应重连/重试。未自动重放 POST，避免重复请求或扣费。最近验证可用也不保证切换瞬间仍然可用。
 
 旧手动链式选项仅保留数据兼容，不再用于运行时选路。动态模式运行中暂停订阅刷新；停止后可更新再一键打通。聚合链接/YAML 仍仅导出原始节点池。代码尚未在 macOS 编译及真实线路验证。
+
+## v0.4.1：出网验证、延迟测速与排序（本节优先于历史版本）
+
+- 连接前先用本机非 TUN 内核检测 HTTPS 出网，按来源交错检查候选，优先复用新鲜的已测成功结果。只有真实业务监听也返回预期响应后，才开启新的系统代理。
+- 默认单跳优先，不再直接把系统流量交给未验证的长链。多跳探索仍可在“链式代理”页面显式开启。
+- TUN 前先验证线路，再保留同一节点启动 TUN；按当前默认路由解析物理出口，而不是假定 Wi-Fi 网卡。若发现另一 VPN 已接管默认路由，拒绝叠加 TUN。接管后重新检测，失败则尝试恢复；管理员若取消恢复授权，界面保留“恢复网络”提示。
+- 为代理服务器域名提供独立的 IPv4 DNS，并在 TUN 模式绑定已识别的出口，降低 DNS 引导与 VPN 路由相互依赖的风险。
+- “节点”页提供全部测速、单节点测速、进度、取消、延迟升序 / 名称 / 原始顺序。6 路并发，节点请求超时预算 5 秒；失败不会显示成 `0 ms`，未测与失败节点排在成功节点之后。
+- 测速调用内核的独立节点延迟接口，不改变 SMART 业务组。若内核尚未运行，只启动本机内核，不开启系统代理或 TUN。结果私有保存在应用数据目录的 `latencies.json`。
+- 选择节点也需通过出网测试，失败时保留或恢复原出口。普通 HTTPS 连通性与 OpenAI API 检查分开展示，避免把地区/账号限制当作所有网络均不可用。
+
+安全更新已安装应用：先正常退出 SmartClash，再运行 `bash script/build_and_run.sh --update`；旧应用会保存在项目 `dist/SmartClash-installed-backup-*.app`。`ruby script/check_network.rb` 可使用临时隔离内核抽测缓存节点（`--all` 为全部），不会接管系统网络，也不输出节点凭据。
+
+## v0.5.0：可视化链路、三种模式与流量面板
+
+本节优先于历史版本说明。保留原订阅、本地缓存、图标与多跳探索设置。
+
+1. **前后台隔离**：只有连接、更新、手动切换等前台操作显示忙碌状态。后台健康检测不再触发全页转圈，也不禁用停止按钮；停止可取消网络检测。重复健康信息去重发布，应用图标只解码一次，实时流量由独立观察对象更新。
+2. **真实链路图**：依据生效节点及 `dialer-proxy` 引用，还原“本机 → 入口 → 中间节点 → 出口 → 目标”。展示跳数、协议、备用数和网络/OpenAI 状态；缺失引用或循环会明确标记不完整，不以动画冒充连接。
+3. **低延迟模式**：优先选择实测 HTTPS 延迟较低且业务出网验证通过的候选。
+4. **高速模式**：对最多 3 个候选分别通过独立 PROBE 监听下载 1 MiB，以下载字节/秒排序，展示 Mbps；一轮约消耗 3 MiB 测速流量。短时抽测不代表持续下载带宽，不会拿延迟假造吞吐，也不保证找到所有节点中的全局最优。
+5. **AI 模式**：候选必须通过真实 OpenAI API 检查；结构化的无密钥认证响应可以确认 API 端点可达，不代表账号、网页登录、验证码或付费权限。其他模式不再仅因 OpenAI 地区限制而把正常互联网线路判为全断。
+6. **实时流量**：从内核 `/traffic` 读取上传/下载速率及累计字节，显示最近 60 秒曲线、本次内核运行累计和历史累计。历史从本功能开始记录，不能还原旧版本未记录的数据。统计以内核上报为准，测速/探测可能计入；不是全电脑流量或服务商账单。
+
+选择模式只保存偏好，连接时生效；已有连接需点击“按此模式重新选路”。验证失败会尝试保留原出口，不能把未确认的 AI/带宽结果标为成功。PROBE 组可测试原始节点与生成链路，不改 SMART 业务选择。
+
+本机数据新增 `link-measurements.json` 和 `traffic-history.json`，仍使用私有目录/文件权限。构建 `dist` 不再退出正在使用的 `/Applications/SmartClash.app`；安装更新则要求先正常退出，以免擅自中断代理。
+
+验收命令：
+
+```bash
+swift test --arch x86_64
+# 仅在本机内核已运行时启用只读流量集成验证；离线 UI 验证不改网络。
+SMARTCLASH_LIVE_TEST=1 SMARTCLASH_RENDER_PREVIEW=1 swift test --arch x86_64
+bash script/package.sh
+```
+
+离线 UI 预览生成于 `dist/chain-ui-preview-0.5.0.png`，清楚标记为示例数据；最终安装后的真实连接与管理员授权验收仍需单独完成。

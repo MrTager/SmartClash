@@ -7,6 +7,8 @@ let package = Package(
     targets: [
         .target(name: "ProxyLogic", dependencies: ["Yams"]),
         .executableTarget(name: "SmartClash", dependencies: ["ProxyLogic"]),
-        .testTarget(name: "ProxyLogicTests", dependencies: ["ProxyLogic"])
+        .executableTarget(name: "SmartClashImport", dependencies: ["ProxyLogic", "Yams"]),
+        .testTarget(name: "ProxyLogicTests", dependencies: ["ProxyLogic"]),
+        .testTarget(name: "SmartClashTests", dependencies: ["SmartClash", "ProxyLogic"])
     ]
 )

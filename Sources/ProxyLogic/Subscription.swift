@@ -6,6 +6,8 @@ public struct Source: Codable, Identifiable, Equatable {
     public var id: UUID
     public var name: String
     public var url: String
+    // An empty address denotes an imported, offline-only configuration snapshot.
+    public var isLocal: Bool { url.isEmpty }
     public init(name: String, url: String) { id = UUID(); self.name = name; self.url = url }
 }
 public struct ProxyNode: Identifiable {
@@ -30,14 +32,24 @@ public enum SubscriptionParser {
             throw ProxyError.message("需要含 proxies 的 Clash YAML/JSON 订阅（最多 5000 个节点）；不支持 Base64 URI 列表或仅有 provider 的配置")
         }
         let supported: Set<String> = ["ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "socks5", "http", "snell", "anytls"]
-        return try nodes.map { raw in
+        return try nodes.map { input in
+            let raw = try normalizeTransport(input)
             guard let type = raw["type"] as? String, supported.contains(type),
                   let server = raw["server"] as? String, !server.isEmpty,
                   let port = raw["port"] as? Int, (1...65535).contains(port),
                   let original = raw["name"] as? String, !original.isEmpty else {
                 throw ProxyError.message("订阅存在不支持或缺少 name/type/server/port 的节点")
             }
-            try validate(raw)
+            var checked = raw
+            if type == "ss", raw["plugin"] as? String == "obfs",
+               let options = raw["plugin-opts"] as? [String: Any],
+               Set(options.keys).isSubset(of: ["mode", "host"]),
+               ["http", "tls"].contains(options["mode"] as? String ?? ""),
+               options.values.allSatisfy({ $0 is String }) {
+                // Mihomo implements this transport internally; no external plugin is executed.
+                checked.removeValue(forKey: "plugin")
+            }
+            try validate(checked)
             var identity = raw; identity.removeValue(forKey: "name")
             let data = try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys])
             let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -46,6 +58,24 @@ public enum SubscriptionParser {
             var payload = raw; payload["name"] = name
             return ProxyNode(id: fingerprint, name: name, sourceID: source.id, payload: payload)
         }
+    }
+    private static func normalizeTransport(_ input: [String: Any]) throws -> [String: Any] {
+        guard input["ws-path"] != nil || input["ws-headers"] != nil else { return input }
+        guard input["type"] as? String == "vmess", input["network"] as? String == "ws" else {
+            throw ProxyError.message("旧式 WebSocket 参数仅适用于 VMess WebSocket 节点")
+        }
+        var raw = input
+        var options = raw["ws-opts"] as? [String: Any] ?? [:]
+        if let path = raw.removeValue(forKey: "ws-path") {
+            guard path is String else { throw ProxyError.message("WebSocket 路径格式无效") }
+            if options["path"] == nil { options["path"] = path }
+        }
+        if let headers = raw.removeValue(forKey: "ws-headers") {
+            guard headers is [String: String] else { throw ProxyError.message("WebSocket 请求头格式无效") }
+            if options["headers"] == nil { options["headers"] = headers }
+        }
+        raw["ws-opts"] = options
+        return raw
     }
     private static func validate(_ value: Any) throws {
         if let dict = value as? [String: Any] {

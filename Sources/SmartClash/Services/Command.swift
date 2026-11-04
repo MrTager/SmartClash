@@ -1,18 +1,42 @@
 import Foundation
 import ProxyLogic
 struct CommandResult { let code: Int32; let text: String }
+private final class CancellableCommand: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+    func launch(_ process: Process) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancelled else { throw CancellationError() }
+        try process.run(); self.process = process
+    }
+    func cancel() {
+        lock.lock(); cancelled = true
+        let running = process
+        lock.unlock()
+        if let running, running.isRunning { running.terminate() }
+    }
+}
 enum Command {
-    static func run(_ executable: String, _ args: [String]) async throws -> CommandResult {
-        try await Task.detached(priority: .utility) {
+    static func run(_ executable: String, _ args: [String], cancellable: Bool = false) async throws -> CommandResult {
+        let command = CancellableCommand()
+        return try await withTaskCancellationHandler {
+            if cancellable { try Task.checkCancellation() }
+            let result = try await Task.detached(priority: .utility) {
             let p = Process(); p.executableURL = URL(fileURLWithPath: executable); p.arguments = args
             let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
             var environment = ProcessInfo.processInfo.environment
             environment["LC_ALL"] = "C"; p.environment = environment
-            try p.run()
+            try command.launch(p)
             let bytes = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             return CommandResult(code: p.terminationStatus, text: String(decoding: bytes, as: UTF8.self))
-        }.value
+            }.value
+            if cancellable { try Task.checkCancellation() }
+            return result
+        } onCancel: {
+            if cancellable { command.cancel() }
+        }
     }
     static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     static func admin(_ script: String) async throws {
