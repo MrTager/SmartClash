@@ -1,5 +1,7 @@
 use crate::logic::health::{delay_path, now_ms, HealthPolicy, InternetPolicy};
-use crate::logic::model::{NodeLatency, ProbeResult, ThroughputSample, TrafficMode, CONTROLLER_PORT};
+use crate::logic::model::{
+    ConnectionSnapshot, NodeLatency, ProbeResult, ThroughputSample, TrafficMode, CONTROLLER_PORT,
+};
 use crate::services::{command, paths};
 use serde_json::Value;
 use std::os::windows::process::CommandExt;
@@ -49,6 +51,12 @@ impl CoreClient {
 
     pub fn version(&self) -> Result<Value, String> {
         self.api("/version", "GET", None, 4)
+    }
+
+    /// 拉取内核实时连接快照（对应 macOS 版 client.connections()）。
+    pub fn connections(&self) -> Result<ConnectionSnapshot, String> {
+        let value = self.api("/connections", "GET", None, 5)?;
+        serde_json::from_value(value).map_err(|e| format!("连接数据解析失败：{e}"))
     }
 
     pub fn select(&self, name: &str, group: &str) -> Result<(), String> {

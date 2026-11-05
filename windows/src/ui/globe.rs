@@ -1,140 +1,740 @@
-use super::widgets::{self, hint, ACCENT, GOOD, MUTED};
+//! 全球连接地球面板：与 macOS 版 NetworkGlobePanel + GlobeScene 1:1 对齐。
+//! 数据来自真实的节点服务器 IP 与内核实时连接（ipwho.is 定位，24h 缓存）。
+
+use super::widgets::{self, hint};
 use super::ViewState;
+use crate::logic::model::{CoreConnection, GeoLocation, ProxyNode};
 use crate::state::Store;
-use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 const LAND: &str = include_str!("../../resources/world-land.json");
 
-struct Region {
-    code: &'static str,
-    label: &'static str,
+// ---- 配色（对应 GlobeScene.swift / earthTexture()） ------------------------
+const SCENE_BG: Color32 = Color32::from_rgb(6, 11, 20); // 0.025, 0.045, 0.08
+const OCEAN: [f32; 3] = [6.0, 19.0, 33.0]; // 0.025, 0.075, 0.13
+const LAND_FILL: [f32; 3] = [26.0, 74.0, 89.0]; // 0.10, 0.29, 0.35
+const LAND_STROKE: [f32; 3] = [46.0, 130.0, 143.0]; // 0.18, 0.51, 0.56
+const CYAN: Color32 = Color32::from_rgb(0, 255, 255);
+const TEAL: Color32 = Color32::from_rgb(100, 210, 255);
+const ORANGE: Color32 = Color32::from_rgb(255, 159, 10);
+// 半透明白：from_rgba_unmultiplied 非 const，用函数近似。
+fn white(alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
+}
+
+const DEFAULT_LAT: f32 = 23.0;
+const DEFAULT_LON: f32 = 110.0;
+const MIN_DISTANCE: f32 = 3.0;
+const MAX_DISTANCE: f32 = 8.0;
+const DEFAULT_DISTANCE: f32 = 3.9;
+
+// ---- 快照（对应 GlobeSnapshot.swift） --------------------------------------
+
+#[derive(Clone)]
+struct Marker {
+    id: String,
     lat: f32,
     lon: f32,
-    keywords: &'static [&'static str],
+    is_node: bool,
+    active: bool,
 }
 
-const REGIONS: &[Region] = &[
-    Region { code: "HK", label: "香港", lat: 22.3, lon: 114.2, keywords: &["香港", "深港", "沙田", "Hong Kong", "HongKong"] },
-    Region { code: "MO", label: "澳门", lat: 22.2, lon: 113.5, keywords: &["澳门", "Macau", "Macao"] },
-    Region { code: "TW", label: "台湾", lat: 23.7, lon: 121.0, keywords: &["台湾", "台北", "新北", "彰化", "Taiwan", "Taipei"] },
-    Region { code: "JP", label: "日本", lat: 36.0, lon: 138.0, keywords: &["日本", "东京", "大阪", "名古屋", "埼玉", "Japan", "Tokyo", "Osaka"] },
-    Region { code: "KR", label: "韩国", lat: 36.5, lon: 127.8, keywords: &["韩国", "首尔", "Korea", "Seoul"] },
-    Region { code: "SG", label: "新加坡", lat: 1.35, lon: 103.8, keywords: &["新加坡", "狮城", "Singapore"] },
-    Region { code: "MY", label: "马来西亚", lat: 3.1, lon: 101.7, keywords: &["马来西亚", "吉隆坡", "Malaysia", "Kuala Lumpur"] },
-    Region { code: "TH", label: "泰国", lat: 13.75, lon: 100.5, keywords: &["泰国", "曼谷", "Thailand", "Bangkok"] },
-    Region { code: "VN", label: "越南", lat: 21.0, lon: 105.8, keywords: &["越南", "河内", "胡志明", "Vietnam"] },
-    Region { code: "PH", label: "菲律宾", lat: 14.6, lon: 121.0, keywords: &["菲律宾", "马尼拉", "Philippines", "Manila"] },
-    Region { code: "ID", label: "印度尼西亚", lat: -6.2, lon: 106.8, keywords: &["印尼", "印度尼西亚", "雅加达", "Indonesia", "Jakarta"] },
-    Region { code: "IN", label: "印度", lat: 20.0, lon: 77.0, keywords: &["印度", "孟买", "India", "Mumbai"] },
-    Region { code: "PK", label: "巴基斯坦", lat: 30.0, lon: 70.0, keywords: &["巴基斯坦", "Pakistan"] },
-    Region { code: "BD", label: "孟加拉", lat: 23.7, lon: 90.4, keywords: &["孟加拉", "Bangladesh"] },
-    Region { code: "LK", label: "斯里兰卡", lat: 7.0, lon: 80.7, keywords: &["斯里兰卡", "Sri Lanka"] },
-    Region { code: "NP", label: "尼泊尔", lat: 27.7, lon: 85.3, keywords: &["尼泊尔", "Nepal"] },
-    Region { code: "KH", label: "柬埔寨", lat: 11.5, lon: 104.9, keywords: &["柬埔寨", "Cambodia"] },
-    Region { code: "MM", label: "缅甸", lat: 16.8, lon: 96.2, keywords: &["缅甸", "Myanmar"] },
-    Region { code: "MN", label: "蒙古", lat: 47.9, lon: 106.9, keywords: &["蒙古", "Mongolia"] },
-    Region { code: "KZ", label: "哈萨克斯坦", lat: 48.0, lon: 67.0, keywords: &["哈萨克", "Kazakhstan"] },
-    Region { code: "CN", label: "中国", lat: 35.0, lon: 105.0, keywords: &["中国", "内地", "回国", "China"] },
-    Region { code: "AE", label: "阿联酋", lat: 24.4, lon: 54.4, keywords: &["阿联酋", "迪拜", "UAE", "Dubai", "Emirates"] },
-    Region { code: "SA", label: "沙特", lat: 24.7, lon: 46.7, keywords: &["沙特", "Saudi"] },
-    Region { code: "QA", label: "卡塔尔", lat: 25.3, lon: 51.5, keywords: &["卡塔尔", "Qatar"] },
-    Region { code: "IL", label: "以色列", lat: 31.8, lon: 35.0, keywords: &["以色列", "Israel"] },
-    Region { code: "TR", label: "土耳其", lat: 39.0, lon: 35.0, keywords: &["土耳其", "伊斯坦布尔", "Turkey", "Istanbul"] },
-    Region { code: "RU", label: "俄罗斯", lat: 55.7, lon: 37.6, keywords: &["俄罗斯", "莫斯科", "圣彼得堡", "Russia", "Moscow"] },
-    Region { code: "UA", label: "乌克兰", lat: 50.4, lon: 30.5, keywords: &["乌克兰", "Ukraine"] },
-    Region { code: "DE", label: "德国", lat: 50.1, lon: 8.7, keywords: &["德国", "法兰克福", "柏林", "慕尼黑", "Germany", "Frankfurt", "Berlin"] },
-    Region { code: "GB", label: "英国", lat: 51.5, lon: -0.1, keywords: &["英国", "伦敦", "United Kingdom", "Britain", "London"] },
-    Region { code: "FR", label: "法国", lat: 48.9, lon: 2.35, keywords: &["法国", "巴黎", "France", "Paris"] },
-    Region { code: "NL", label: "荷兰", lat: 52.4, lon: 4.9, keywords: &["荷兰", "阿姆斯特丹", "Netherlands", "Amsterdam"] },
-    Region { code: "BE", label: "比利时", lat: 50.8, lon: 4.35, keywords: &["比利时", "Belgium"] },
-    Region { code: "CH", label: "瑞士", lat: 46.9, lon: 7.4, keywords: &["瑞士", "Switzerland", "Zurich"] },
-    Region { code: "AT", label: "奥地利", lat: 48.2, lon: 16.4, keywords: &["奥地利", "Austria", "Vienna"] },
-    Region { code: "IT", label: "意大利", lat: 41.9, lon: 12.5, keywords: &["意大利", "米兰", "Italy", "Milan"] },
-    Region { code: "ES", label: "西班牙", lat: 40.4, lon: -3.7, keywords: &["西班牙", "Spain", "Madrid"] },
-    Region { code: "SE", label: "瑞典", lat: 59.3, lon: 18.1, keywords: &["瑞典", "Sweden", "Stockholm"] },
-    Region { code: "NO", label: "挪威", lat: 59.9, lon: 10.7, keywords: &["挪威", "Norway", "Oslo"] },
-    Region { code: "DK", label: "丹麦", lat: 55.7, lon: 12.6, keywords: &["丹麦", "Denmark"] },
-    Region { code: "FI", label: "芬兰", lat: 60.2, lon: 24.9, keywords: &["芬兰", "Finland", "Helsinki"] },
-    Region { code: "PL", label: "波兰", lat: 52.2, lon: 21.0, keywords: &["波兰", "Poland", "Warsaw"] },
-    Region { code: "IE", label: "爱尔兰", lat: 53.3, lon: -6.3, keywords: &["爱尔兰", "Ireland", "Dublin"] },
-    Region { code: "CZ", label: "捷克", lat: 50.1, lon: 14.4, keywords: &["捷克", "Czech", "Prague"] },
-    Region { code: "PT", label: "葡萄牙", lat: 38.7, lon: -9.1, keywords: &["葡萄牙", "Portugal", "Lisbon"] },
-    Region { code: "GR", label: "希腊", lat: 38.0, lon: 23.7, keywords: &["希腊", "Greece", "Athens"] },
-    Region { code: "HU", label: "匈牙利", lat: 47.5, lon: 19.0, keywords: &["匈牙利", "Hungary", "Budapest"] },
-    Region { code: "RO", label: "罗马尼亚", lat: 44.4, lon: 26.1, keywords: &["罗马尼亚", "Romania"] },
-    Region { code: "US", label: "美国", lat: 38.0, lon: -97.0, keywords: &["美国", "洛杉矶", "圣何塞", "西雅图", "纽约", "达拉斯", "芝加哥", "凤凰城", "迈阿密", "硅谷", "United States", "America", "Los Angeles", "San Jose", "Seattle", "New York", "Dallas"] },
-    Region { code: "CA", label: "加拿大", lat: 56.0, lon: -106.0, keywords: &["加拿大", "多伦多", "温哥华", "蒙特利尔", "Canada", "Toronto", "Vancouver"] },
-    Region { code: "MX", label: "墨西哥", lat: 23.6, lon: -102.0, keywords: &["墨西哥", "Mexico"] },
-    Region { code: "BR", label: "巴西", lat: -15.8, lon: -47.9, keywords: &["巴西", "圣保罗", "Brazil", "Sao Paulo"] },
-    Region { code: "AR", label: "阿根廷", lat: -34.6, lon: -58.4, keywords: &["阿根廷", "Argentina"] },
-    Region { code: "CL", label: "智利", lat: -33.4, lon: -70.7, keywords: &["智利", "Chile"] },
-    Region { code: "CO", label: "哥伦比亚", lat: 4.7, lon: -74.1, keywords: &["哥伦比亚", "Colombia"] },
-    Region { code: "PE", label: "秘鲁", lat: -12.0, lon: -77.0, keywords: &["秘鲁", "Peru"] },
-    Region { code: "ZA", label: "南非", lat: -26.2, lon: 28.0, keywords: &["南非", "South Africa"] },
-    Region { code: "EG", label: "埃及", lat: 30.0, lon: 31.2, keywords: &["埃及", "Egypt"] },
-    Region { code: "NG", label: "尼日利亚", lat: 9.1, lon: 7.4, keywords: &["尼日利亚", "Nigeria"] },
-    Region { code: "KE", label: "肯尼亚", lat: -1.3, lon: 36.8, keywords: &["肯尼亚", "Kenya"] },
-    Region { code: "MA", label: "摩洛哥", lat: 33.6, lon: -7.6, keywords: &["摩洛哥", "Morocco"] },
-    Region { code: "AU", label: "澳大利亚", lat: -33.9, lon: 151.2, keywords: &["澳大利亚", "澳洲", "悉尼", "墨尔本", "Australia", "Sydney", "Melbourne"] },
-    Region { code: "NZ", label: "新西兰", lat: -41.3, lon: 174.8, keywords: &["新西兰", "New Zealand"] },
-];
+#[derive(Clone)]
+struct Route {
+    locations: Vec<(f32, f32)>,
+    selected: bool,
+    highlighted: bool,
+}
 
-fn has_token(text: &str, token: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    while let Some(offset) = text[start..].find(token) {
-        let position = start + offset;
-        let before_ok = position == 0 || !bytes[position - 1].is_ascii_alphanumeric();
-        let end = position + token.len();
-        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            return true;
+struct Snapshot {
+    markers: Vec<Marker>,
+    routes: Vec<Route>,
+    mapped_nodes: usize,
+    mapped_connections: usize,
+}
+
+fn node_server(node: &ProxyNode) -> Option<String> {
+    node.payload
+        .get("server")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn build_snapshot(
+    store: &Store,
+    connections: &[CoreConnection],
+    locations: &HashMap<String, GeoLocation>,
+    focused: Option<&str>,
+) -> Snapshot {
+    let mut markers: Vec<Marker> = Vec::new();
+    let active_ids: std::collections::HashSet<&String> = store
+        .active_trace
+        .hops
+        .iter()
+        .map(|hop| &hop.id)
+        .collect();
+
+    let insert_marker = |markers: &mut Vec<Marker>, marker: Marker| {
+        if let Some(existing) = markers.iter_mut().find(|m| m.id == marker.id) {
+            if marker.active {
+                *existing = marker;
+            }
+        } else {
+            markers.push(marker);
         }
-        start = position + token.len();
-    }
-    false
-}
+    };
 
-fn flag(code: &str) -> String {
-    let mut out = String::new();
-    for letter in code.chars() {
-        if let Some(value) = (letter as u32).checked_sub('A' as u32) {
-            if let Some(ch) = char::from_u32(0x1F1E6 + value) {
-                out.push(ch);
+    for node in &store.nodes {
+        let Some(server) = node_server(node) else { continue };
+        let Some(location) = locations.get(&server) else { continue };
+        insert_marker(
+            &mut markers,
+            Marker {
+                id: format!("node:{server}"),
+                lat: location.latitude as f32,
+                lon: location.longitude as f32,
+                is_node: true,
+                active: active_ids.contains(&node.id),
+            },
+        );
+    }
+    let mapped_nodes = markers.len();
+
+    let all_nodes = store.node_list_nodes();
+    let index: HashMap<String, &ProxyNode> = all_nodes
+        .iter()
+        .map(|node| (node.name.clone(), node))
+        .collect();
+
+    let mut routes: Vec<Route> = Vec::new();
+    let mut mapped_connections = 0usize;
+
+    // 当前链路（选中出口的完整路径）。
+    let current: Vec<(f32, f32)> = store
+        .active_trace
+        .hops
+        .iter()
+        .filter_map(|hop| {
+            let server = all_nodes
+                .iter()
+                .find(|node| node.id == hop.id)
+                .and_then(|node| node_server(node))?;
+            locations.get(&server).map(|l| (l.latitude as f32, l.longitude as f32))
+        })
+        .collect();
+    if current.len() > 1
+        && current.len() == store.active_trace.hops.len()
+        && store.active_trace.complete
+    {
+        routes.push(Route {
+            locations: current,
+            selected: true,
+            highlighted: true,
+        });
+    }
+
+    // 实时连接：聚焦的排最前（对应 macOS 的排序）。
+    let mut ordered: Vec<&CoreConnection> = connections.iter().collect();
+    ordered.sort_by_key(|c| if Some(c.id.as_str()) == focused { 0 } else { 1 });
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for connection in ordered {
+        let Some(key) = connection.metadata.geolocation_key() else { continue };
+        let Some(destination) = locations.get(&key) else { continue };
+        let path = connection.route_nodes(&index);
+        if path.is_empty() {
+            continue;
+        }
+        let mut hops: Vec<(f32, f32)> = Vec::new();
+        for node in &path {
+            let Some(server) = node_server(node) else { break };
+            match locations.get(&server) {
+                Some(l) => hops.push((l.latitude as f32, l.longitude as f32)),
+                None => break,
             }
         }
+        if hops.len() != path.len() {
+            continue;
+        }
+        mapped_connections += 1;
+        insert_marker(
+            &mut markers,
+            Marker {
+                id: format!("target:{key}"),
+                lat: destination.latitude as f32,
+                lon: destination.longitude as f32,
+                is_node: false,
+                active: Some(connection.id.as_str()) == focused,
+            },
+        );
+        hops.push((destination.latitude as f32, destination.longitude as f32));
+        let route_key = format!(
+            "{}:{key}",
+            path.iter().map(|n| n.id.clone()).collect::<Vec<_>>().join("/")
+        );
+        if seen.insert(route_key) && routes.len() < 48 {
+            routes.push(Route {
+                locations: hops,
+                selected: false,
+                highlighted: focused.is_none() || Some(connection.id.as_str()) == focused,
+            });
+        }
     }
-    out
+
+    markers.sort_by(|a, b| a.id.cmp(&b.id));
+    Snapshot {
+        markers,
+        routes,
+        mapped_nodes,
+        mapped_connections,
+    }
 }
 
-fn region_index(name: &str) -> Option<usize> {
-    let lower = name.to_lowercase();
-    for (index, region) in REGIONS.iter().enumerate() {
-        if name.contains(&flag(region.code)) || has_token(name, region.code) {
-            return Some(index);
+// ---- 主绘制 ---------------------------------------------------------------
+
+pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
+    let activity = store
+        .activity
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let snapshot = build_snapshot(
+        store,
+        &activity.connections,
+        &activity.locations,
+        view.focused_connection.as_deref(),
+    );
+
+    widgets::card(ui, None, |ui| {
+        // ---- 头部：全球连接 + 实时状态（对应 NetworkGlobePanel 头部） ----
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("● 全球连接")
+                    .size(15.0)
+                    .strong()
+                    .color(widgets::TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (color, text) = if activity.connected {
+                    (widgets::GOOD, format!("实时 · {} 个连接", activity.connections.len()))
+                } else if store.running {
+                    (widgets::MUTED, "正在连接内核…".to_string())
+                } else {
+                    (widgets::MUTED, "等待连接".to_string())
+                };
+                ui.label(RichText::new("●").size(8.0).color(color));
+                ui.label(RichText::new(text).size(12.0).color(widgets::MUTED));
+            });
+        });
+        ui.add_space(12.0);
+
+        // ---- 深色地球区域 ----
+        let width = ui.available_width().max(280.0);
+        let height = 330.0_f32.min(width * 0.62).max(250.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+
+        // 拖动旋转（0.008 rad/px，与 macOS rotateCamera 一致）。
+        // egui 的 delta.y 向下为正，向下拖 = 相机纬度升高。
+        if response.dragged() {
+            let delta = response.drag_delta();
+            view.globe_yaw -= delta.x * 0.458;
+            view.globe_pitch = (view.globe_pitch + delta.y * 0.458).clamp(-85.0, 85.0);
         }
-        for keyword in region.keywords {
-            if keyword.is_ascii() {
-                if has_token(&lower, &keyword.to_lowercase()) {
-                    return Some(index);
+        // 滚轮缩放（3–8，与 macOS zoomCamera 一致）。
+        if response.hovered() {
+            let scroll = ui.input(|input| input.raw_scroll_delta.y);
+            if scroll != 0.0 {
+                view.globe_distance =
+                    (view.globe_distance * (-scroll * 0.0012).exp()).clamp(MIN_DISTANCE, MAX_DISTANCE);
+            }
+        }
+        if view.globe_yaw > 180.0 {
+            view.globe_yaw -= 360.0;
+        } else if view.globe_yaw < -180.0 {
+            view.globe_yaw += 360.0;
+        }
+
+        // 首次出现标记时，镜头对准当前出口（对应 firstMarkers 逻辑）。
+        if !snapshot.markers.is_empty() && !view.globe_had_markers {
+            if let Some(active) = snapshot
+                .markers
+                .iter()
+                .find(|marker| marker.active && marker.is_node)
+            {
+                reset_camera(view, Some((active.lat, active.lon)));
+            }
+        }
+        view.globe_had_markers = !snapshot.markers.is_empty();
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, egui::Rounding::same(12.0), SCENE_BG);
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(12.0),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)),
+        );
+
+        let center = rect.center();
+        // FOV 42°、距离 3.9 时球体直径约占视口高度 71%。
+        let base = (rect.height() * 0.354).min(rect.width() * 0.40);
+        let radius = base * DEFAULT_DISTANCE / view.globe_distance;
+        let yaw = view.globe_yaw;
+        let pitch = view.globe_pitch;
+        let now = ui.input(|input| input.time) as f32;
+
+        // ---- 球体纹理 ----
+        let pixels = (radius * 2.8).clamp(256.0, 512.0) as usize;
+        let texture = globe_texture(ui, view, yaw, pitch, pixels);
+        painter.image(
+            texture.id(),
+            Rect::from_center_size(center, Vec2::splat(radius * 2.0)),
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+
+        // ---- 航线（对应 tube + tracer 粒子） ----
+        for route in &snapshot.routes {
+            let color = if route.selected { CYAN } else { ORANGE };
+            let alpha = if route.highlighted { 242 } else { 51 };
+            let stroke_color = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+            let width = if route.selected { (radius * 0.008).max(2.0) } else { (radius * 0.005).max(1.1) };
+            let duration = if route.selected { 3.0 } else { 2.4 };
+            for window in route.locations.windows(2) {
+                let points = arc_points(window[0], window[1]);
+                let mut previous: Option<(Pos2, f32)> = None;
+                for point in &points {
+                    let lifted = (point.0, point.1, point.2);
+                    let (position, visible) = project_vec(lifted, center, radius, pitch, yaw);
+                    if let Some((last, last_visible)) = previous {
+                        if visible > 0.02 && last_visible > 0.02 {
+                            painter.line_segment([last, position], Stroke::new(width, stroke_color));
+                        }
+                    }
+                    previous = Some((position, visible));
                 }
-            } else if name.contains(keyword) {
-                return Some(index);
+                if route.highlighted {
+                    let progress = (now / duration).fract();
+                    let index = (progress * (points.len() - 1) as f32).round() as usize;
+                    let point = points[index.min(points.len() - 1)];
+                    let (position, visible) = project_vec(point, center, radius, pitch, yaw);
+                    if visible > 0.02 {
+                        let size = (radius * 0.007).max(1.5);
+                        painter.circle_filled(position, size, color);
+                    }
+                }
             }
         }
+
+        // ---- 标记（节点青色 / 目标橙色，激活带光环） ----
+        for marker in &snapshot.markers {
+            let scale = if marker.is_node { 1.012 } else { 1.012 };
+            let (x, y, z) = unit_vector(marker.lat, marker.lon);
+            let (position, visible) = project_vec((x * scale, y * scale, z * scale), center, radius, pitch, yaw);
+            if visible <= 0.02 {
+                continue;
+            }
+            let color = if marker.is_node {
+                if marker.active { CYAN } else { TEAL }
+            } else {
+                ORANGE
+            };
+            let size = (radius * if marker.active { 0.018 } else { 0.010 }).max(1.5);
+            if marker.active {
+                let halo = (radius * 0.032).max(size + 2.0);
+                painter.circle_stroke(
+                    position,
+                    halo,
+                    Stroke::new(
+                        (radius * 0.004).max(1.0),
+                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 178),
+                    ),
+                );
+            }
+            painter.circle_filled(position, size, color);
+        }
+
+        // ---- 覆盖层文字（对应 ZStack 内 VStack） ----
+        let pad = 16.0;
+        let mut cursor = Pos2::new(rect.min.x + pad, rect.min.y + 14.0);
+        let trace_text = if store.active_trace.hops.is_empty() {
+            "尚未选择出口".to_string()
+        } else {
+            format!("当前 {} 跳线路", store.active_trace.hops.len())
+        };
+        cursor = paint_line(&painter, cursor, &trace_text, FontId::monospace(12.0), CYAN);
+        if let Some(last) = store.active_trace.hops.last() {
+            let title = last.name.split(" · ").next().unwrap_or(&last.name);
+            cursor = paint_line(&painter, cursor, title, FontId::proportional(15.0), Color32::WHITE);
+        }
+        cursor = paint_line(
+            &painter,
+            cursor,
+            &format!(
+                "{} 处节点 · {} 个请求已定位",
+                snapshot.mapped_nodes, snapshot.mapped_connections
+            ),
+            FontId::proportional(12.0),
+            white(166),
+        );
+        if activity.resolving {
+            paint_line(&painter, cursor, "正在解析 IP 位置…", FontId::proportional(10.5), white(128));
+        }
+
+        // 底部图例。
+        let legend_y = rect.max.y - 26.0;
+        let mut legend_x = rect.min.x + pad;
+        legend_x = paint_legend(&painter, Pos2::new(legend_x, legend_y), CYAN, "代理节点") + 16.0;
+        paint_legend(&painter, Pos2::new(legend_x, legend_y), ORANGE, "请求目标 / 流向");
+
+        // 未连接时底部居中提示。
+        if !activity.enabled {
+            let galley = painter.layout_no_wrap(
+                "连接后显示节点与请求目标的真实连线".into(),
+                FontId::proportional(12.0),
+                white(166),
+            );
+            let start = Pos2::new(
+                center.x - galley.size().x / 2.0,
+                rect.max.y - 49.0 - galley.size().y,
+            );
+            painter.galley(start, galley, white(166));
+        }
+
+        // 有动画元素时持续重绘。
+        if !snapshot.routes.is_empty() || activity.resolving {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        }
+
+        // 右下角“回到当前节点”按钮。
+        let button_size = egui::vec2(110.0, 22.0);
+        let button_rect = Rect::from_min_size(
+            Pos2::new(rect.max.x - pad - button_size.x, rect.max.y - 12.0 - button_size.y),
+            button_size,
+        );
+        let reset = ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(button_rect),
+            |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Button::new(
+                            RichText::new("◎ 回到当前节点").size(11.5).color(white(217)),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::NONE),
+                    )
+                    .clicked()
+                })
+                .inner
+            },
+        );
+        if reset.inner {
+            let target = snapshot
+                .markers
+                .iter()
+                .find(|marker| marker.active && marker.is_node)
+                .map(|marker| (marker.lat, marker.lon));
+            reset_camera(view, target);
+        }
+    });
+
+    // ---- 底部操作行 ----
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        hint(ui, "拖动旋转 · 滚轮缩放 · IP 位置为近似值");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(
+                    RichText::new(if view.show_connections {
+                        "收起请求"
+                    } else {
+                        "查看实时请求"
+                    })
+                    .size(12.0)
+                    .color(widgets::ACCENT),
+                ))
+                .clicked()
+            {
+                view.show_connections = !view.show_connections;
+            }
+        });
+    });
+
+    // ---- 实时请求列表 ----
+    if view.show_connections {
+        draw_connections(ui, view, store, &activity);
     }
-    None
+
+    ui.add_space(2.0);
+    hint(
+        ui,
+        "IP 位置由 ipwho.is 提供并缓存 24 小时；目标 IP 缺失时按本机 DNS 估算。未定位与直连请求保留在列表。连线表示地理关系。",
+    );
+    ui.add_space(2.0);
 }
 
-fn is_info_node(name: &str) -> bool {
-    const MARKERS: [&str; 14] = [
-        "剩余", "流量", "到期", "官网", "公告", "套餐", "续费", "客服", "邀请", "注册", "网址",
-        "订阅", "重置", "过期",
-    ];
-    MARKERS.iter().any(|marker| name.contains(marker))
+fn reset_camera(view: &mut ViewState, target: Option<(f32, f32)>) {
+    let (lat, lon) = target.unwrap_or((DEFAULT_LAT, DEFAULT_LON));
+    view.globe_pitch = lat;
+    view.globe_yaw = lon;
+    view.globe_distance = DEFAULT_DISTANCE;
 }
+
+fn paint_line(
+    painter: &egui::Painter,
+    position: Pos2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+) -> Pos2 {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    let height = galley.size().y + 4.0;
+    painter.galley(position, galley, color);
+    Pos2::new(position.x, position.y + height)
+}
+
+fn paint_legend(painter: &egui::Painter, position: Pos2, color: Color32, title: &str) -> f32 {
+    painter.circle_filled(Pos2::new(position.x + 3.0, position.y + 7.0), 3.0, color);
+    let galley = painter.layout_no_wrap(title.to_string(), FontId::proportional(11.0), white(191));
+    let start = Pos2::new(position.x + 11.0, position.y);
+    let width = galley.size().x;
+    painter.galley(start, galley, white(191));
+    start.x + width + 5.0
+}
+
+// ---- 连接列表（对应 connections / connectionRow） --------------------------
+
+fn draw_connections(
+    ui: &mut Ui,
+    view: &mut ViewState,
+    store: &Store,
+    activity: &crate::state::activity::ActivityData,
+) {
+    if activity.connections.is_empty() {
+        hint(
+            ui,
+            if activity.enabled {
+                "当前没有活跃请求"
+            } else {
+                "连接后显示实时请求"
+            },
+        );
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        hint(ui, "请求目标与实际节点");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if view.focused_connection.is_some()
+                && ui
+                    .add(egui::Button::new(
+                        RichText::new("显示全部连线").size(12.0).color(widgets::ACCENT),
+                    ))
+                    .clicked()
+            {
+                view.focused_connection = None;
+            }
+        });
+    });
+    ui.add_space(6.0);
+
+    let listed_nodes = store.node_list_nodes();
+    let index: HashMap<String, &ProxyNode> = listed_nodes
+        .iter()
+        .map(|node| (node.name.clone(), node))
+        .collect();
+    let row_height = 46.0;
+    let visible = (activity.connections.len() * 65).min(230).max(row_height as usize) as f32;
+    let shown: Vec<&CoreConnection> = activity.connections.iter().take(80).collect();
+    egui::ScrollArea::vertical()
+        .max_height(visible)
+        .show_rows(ui, row_height, shown.len(), |ui, range| {
+            for connection in &shown[range] {
+                let focused = view.focused_connection.as_deref() == Some(connection.id.as_str());
+                let frame = if focused {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgba_unmultiplied(108, 140, 255, 26))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(8.0))
+                } else {
+                    egui::Frame::default()
+                        .fill(Color32::TRANSPARENT)
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(8.0))
+                };
+                let clicked = frame
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let response = ui.allocate_response(
+                            egui::vec2(ui.available_width(), row_height - 16.0),
+                            Sense::click(),
+                        );
+                        connection_row(ui, connection, &activity.locations, focused);
+                        response.clicked()
+                    })
+                    .inner;
+                if clicked {
+                    view.focused_connection = if focused {
+                        None
+                    } else {
+                        Some(connection.id.clone())
+                    };
+                    // 聚焦后镜头对准该请求的出口节点（对应 resetCamera(toward:)）。
+                    let exit = connection.route_nodes(&index).last().copied();
+                    if let Some(node) = exit {
+                        if let Some(server) = node_server(node) {
+                            if let Some(location) = activity.locations.get(&server) {
+                                reset_camera(
+                                    view,
+                                    Some((location.latitude as f32, location.longitude as f32)),
+                                );
+                            }
+                        }
+                    }
+                }
+                ui.separator();
+            }
+        });
+    if activity.connections.len() > 80 {
+        hint(ui, "显示流量最高的 80 个连接");
+    }
+}
+
+fn connection_row(
+    ui: &mut Ui,
+    connection: &CoreConnection,
+    locations: &HashMap<String, GeoLocation>,
+    _focused: bool,
+) {
+    ui.horizontal(|ui| {
+        let located = connection
+            .metadata
+            .geolocation_key()
+            .and_then(|key| locations.get(&key));
+        ui.label(
+            RichText::new("●")
+                .size(9.0)
+                .color(if located.is_some() { ORANGE } else { widgets::MUTED }),
+        );
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(connection.metadata.display_destination())
+                    .size(12.0)
+                    .monospace()
+                    .color(widgets::TEXT),
+            );
+            let path = connection.path_label();
+            ui.label(
+                RichText::new(if path.is_empty() {
+                    "节点路径未知"
+                } else {
+                    &path
+                })
+                .size(11.0)
+                .color(widgets::MUTED),
+            );
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.vertical(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    let location_text = located
+                        .map(|location| {
+                            let estimated = connection.metadata.public_destination_ip().is_none();
+                            format!(
+                                "{}{}",
+                                location.label(),
+                                if estimated { " · DNS 估算" } else { "" }
+                            )
+                        })
+                        .unwrap_or_else(|| "位置未解析".into());
+                    ui.label(RichText::new(location_text).size(11.0).color(widgets::MUTED));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "↑ {}  ↓ {}",
+                            crate::logic::traffic::format_bytes(connection.upload),
+                            crate::logic::traffic::format_bytes(connection.download)
+                        ))
+                        .size(11.0)
+                        .color(widgets::MUTED),
+                    );
+                });
+            });
+        });
+    });
+}
+
+// ---- 几何（与 GlobeScene 的 position / arc 一致） ---------------------------
+
+fn unit_vector(lat: f32, lon: f32) -> (f32, f32, f32) {
+    let lat = lat.to_radians();
+    let lon = lon.to_radians();
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    (cos_lat * lon.sin(), sin_lat, cos_lat * lon.cos())
+}
+
+fn rotate_toward(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
+    let dot = (a.0 * b.0 + a.1 * b.1 + a.2 * b.2).clamp(-1.0, 1.0);
+    let angle = dot.acos();
+    if angle < 1e-4 {
+        return a;
+    }
+    let sine = angle.sin();
+    let left = ((1.0 - t) * angle).sin() / sine;
+    let right = (t * angle).sin() / sine;
+    (
+        a.0 * left + b.0 * right,
+        a.1 * left + b.1 * right,
+        a.2 * left + b.2 * right,
+    )
+}
+
+/// 大圆弧 + 抬升：1.016 + sin(πt)·min(0.38, 0.08 + angle·0.14)，57 个采样点。
+fn arc_points(from: (f32, f32), to: (f32, f32)) -> Vec<(f32, f32, f32)> {
+    let a = unit_vector(from.0, from.1);
+    let b = unit_vector(to.0, to.1);
+    let dot = (a.0 * b.0 + a.1 * b.1 + a.2 * b.2).clamp(-1.0, 1.0);
+    let angle = dot.acos();
+    (0..=56)
+        .map(|index| {
+            let t = index as f32 / 56.0;
+            let direction = rotate_toward(a, b, t);
+            let lift = 1.016 + (std::f32::consts::PI * t).sin() * (0.08 + angle * 0.14).min(0.38);
+            (direction.0 * lift, direction.1 * lift, direction.2 * lift)
+        })
+        .collect()
+}
+
+/// 正交投影到屏幕；返回 (位置, 可见度 z)。
+fn project_vec(
+    v: (f32, f32, f32),
+    center: Pos2,
+    radius: f32,
+    pitch_deg: f32,
+    yaw_deg: f32,
+) -> (Pos2, f32) {
+    let pitch = pitch_deg.to_radians();
+    let yaw = yaw_deg.to_radians();
+    let (sin_p, cos_p) = pitch.sin_cos();
+    let (sin_y, cos_y) = yaw.sin_cos();
+    // 绕 Y 轴旋转 -yaw。
+    let vx = v.0 * cos_y - v.2 * sin_y;
+    let vz = v.2 * cos_y + v.0 * sin_y;
+    let vy = v.1;
+    // 绕 X 轴旋转 pitch。
+    let y_up = cos_p * vy - sin_p * vz;
+    let z_view = sin_p * vy + cos_p * vz;
+    (
+        center + Vec2::new(vx, -y_up) * radius,
+        z_view,
+    )
+}
+
+// ---- 陆地掩码与球体纹理（对应 earthTexture()） ------------------------------
+
+const MASK_WIDTH: usize = 1024;
+const MASK_HEIGHT: usize = 512;
 
 #[derive(serde::Deserialize)]
 struct Land {
@@ -151,337 +751,6 @@ fn land() -> &'static Vec<Vec<[f32; 2]>> {
         }
     })
 }
-
-pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
-    let mut counts: HashMap<usize, usize> = HashMap::new();
-    let mut recognised = 0usize;
-    let mut total = 0usize;
-    for node in &store.nodes {
-        if is_info_node(&node.name) {
-            continue;
-        }
-        total += 1;
-        if let Some(index) = region_index(&node.name) {
-            *counts.entry(index).or_insert(0) += 1;
-            recognised += 1;
-        }
-    }
-
-    let active_region = store
-        .nodes
-        .iter()
-        .find(|node| node.name == store.selected)
-        .and_then(|node| region_index(&node.name));
-
-    let mut entries: Vec<(usize, usize)> = counts.iter().map(|(index, count)| (*index, *count)).collect();
-    entries.sort_by(|a, b| {
-        b.1.cmp(&a.1)
-            .then_with(|| REGIONS[a.0].label.cmp(REGIONS[b.0].label))
-    });
-    let hub = active_region.or_else(|| entries.first().map(|entry| entry.0));
-
-    widgets::card(ui, Some("全球节点分布"), |ui| {
-        ui.horizontal(|ui| {
-            hint(ui, "按节点名称推断地区 · 拖动地球旋转 · 双击复位");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut view.globe_auto, "自动旋转");
-            });
-        });
-        ui.add_space(4.0);
-
-        let width = ui.available_width().max(280.0);
-        let height = (width * 0.5).clamp(240.0, 340.0);
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
-
-        if response.dragged() {
-            let delta = response.drag_delta();
-            view.globe_yaw -= delta.x * 0.4;
-            view.globe_pitch = (view.globe_pitch + delta.y * 0.3).clamp(-72.0, 72.0);
-        }
-        if response.double_clicked() {
-            view.globe_yaw = 105.0;
-            view.globe_pitch = 20.0;
-        }
-        let hovering = response.hovered();
-        if view.globe_auto && !response.dragged() && !hovering {
-            let delta = ui.input(|input| input.stable_dt).min(0.2);
-            view.globe_yaw += delta * 3.0;
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
-        } else if !counts.is_empty() {
-            // 只重绘流动点，不重新生成地球纹理。
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
-        }
-        if view.globe_yaw > 180.0 {
-            view.globe_yaw -= 360.0;
-        } else if view.globe_yaw < -180.0 {
-            view.globe_yaw += 360.0;
-        }
-
-        let painter = ui.painter_at(rect);
-        let center = rect.center();
-        let radius = (rect.height() * 0.44).min(rect.width() * 0.24);
-        let yaw = view.globe_yaw;
-        let pitch = view.globe_pitch;
-
-        painter.circle_filled(center, radius + 12.0, Color32::from_rgba_unmultiplied(84, 152, 255, 8));
-        painter.circle_filled(center, radius + 6.0, Color32::from_rgba_unmultiplied(84, 152, 255, 12));
-
-        let pixels = (radius * 2.8).clamp(256.0, 512.0) as usize;
-        let texture = globe_texture(ui, view, yaw, pitch, pixels);
-        painter.image(
-            texture.id(),
-            Rect::from_center_size(center, Vec2::splat(radius * 2.0)),
-            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
-        painter.circle_stroke(center, radius, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(84, 152, 255, 90)));
-
-        if let Some(hub) = hub {
-            let hub_region = &REGIONS[hub];
-            let now = ui.input(|input| input.time) as f32;
-            let top = entries.first().map(|entry| entry.1).unwrap_or(1).max(1);
-            for (order, (index, count)) in entries.iter().take(14).enumerate() {
-                if *index == hub {
-                    continue;
-                }
-                let region = &REGIONS[*index];
-                let alpha = 46 + ((*count as f32 / top as f32) * 70.0) as u8;
-                let color = Color32::from_rgba_unmultiplied(89, 205, 224, alpha);
-                draw_arc(
-                    &painter,
-                    (hub_region.lat, hub_region.lon),
-                    (region.lat, region.lon),
-                    center,
-                    radius,
-                    yaw,
-                    pitch,
-                    color,
-                    0.05,
-                );
-                if order < 7 {
-                    let progress = (now * 0.16 + order as f32 * 0.17).fract();
-                    if let Some((position, z)) = arc_screen(
-                        (hub_region.lat, hub_region.lon),
-                        (region.lat, region.lon),
-                        progress,
-                        center,
-                        radius,
-                        yaw,
-                        pitch,
-                        0.08,
-                    ) {
-                        if z > 0.02 {
-                            painter.circle_filled(
-                                position,
-                                2.1,
-                                Color32::from_rgba_unmultiplied(150, 226, 240, 210),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        for (index, count) in &counts {
-            let region = &REGIONS[*index];
-            let (mut position, z) = project(region.lat, region.lon, center, radius, pitch, yaw);
-            if z <= 0.04 {
-                continue;
-            }
-            let size = 2.6 + (*count as f32).sqrt() * 1.15;
-            let active = active_region == Some(*index);
-            let color = if active { GOOD } else { ACCENT };
-
-            painter.circle_filled(position, size * 2.4, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 20));
-            painter.circle_filled(position, size, color);
-            painter.circle_stroke(position, size, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(10, 16, 28, 200)));
-            if active {
-                let pulse = 1.0 + ((ui.input(|input| input.time) * 2.0).sin() as f32 + 1.0) * 1.4;
-                painter.circle_stroke(position, size + pulse + 3.0, Stroke::new(1.6_f32, Color32::from_rgba_unmultiplied(88, 199, 132, 150)));
-            }
-            position.y += 0.0;
-        }
-
-        let mut labels: Vec<(usize, Pos2, f32, bool)> = counts
-            .iter()
-            .filter_map(|(index, count)| {
-                let region = &REGIONS[*index];
-                let (position, z) = project(region.lat, region.lon, center, radius, pitch, yaw);
-                if z > 0.08 {
-                    Some((*index, position, *count as f32, active_region == Some(*index)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        labels.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| REGIONS[a.0].label.cmp(REGIONS[b.0].label))
-        });
-
-        let mut placed: Vec<Rect> = Vec::new();
-        for (index, position, count, active) in labels {
-            let region = &REGIONS[index];
-            let color = if active {
-                Color32::from_rgb(88, 199, 132)
-            } else {
-                Color32::from_rgb(206, 216, 232)
-            };
-            let text = format!("{} {}", region.label, count as usize);
-            let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), color);
-            let size = galley.size();
-            let offset = 5.0;
-            let candidates = [
-                Pos2::new(position.x + offset, position.y - size.y - offset),
-                Pos2::new(position.x + offset, position.y + offset),
-                Pos2::new(position.x - size.x - offset, position.y - size.y - offset),
-                Pos2::new(position.x - size.x - offset, position.y + offset),
-            ];
-            for start in candidates {
-                let box_rect = Rect::from_min_size(start, size);
-                if box_rect.min.x < rect.min.x || box_rect.max.x > rect.max.x || box_rect.min.y < rect.min.y || box_rect.max.y > rect.max.y {
-                    continue;
-                }
-                if placed.iter().any(|existing| existing.intersects(box_rect)) {
-                    continue;
-                }
-                placed.push(box_rect);
-                painter.galley(start, galley, color);
-                break;
-            }
-        }
-
-        if let Some(hover) = response.hover_pos() {
-            let nearest = counts
-                .iter()
-                .filter_map(|(index, count)| {
-                    let region = &REGIONS[*index];
-                    let (position, z) = project(region.lat, region.lon, center, radius, pitch, yaw);
-                    if z <= 0.04 {
-                        return None;
-                    }
-                    let distance = position.distance(hover);
-                    (distance <= 14.0).then_some((distance, *index, *count))
-                })
-                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((_, index, count)) = nearest {
-                response.clone().on_hover_text(format!("{} · {} 个节点", REGIONS[index].label, count));
-            }
-        }
-
-        if total == 0 {
-            hint(ui, "还没有节点；导入订阅后这里会显示各出口的地区分布。");
-        } else {
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                for (index, count) in &entries {
-                    let region = &REGIONS[*index];
-                    let color = if active_region == Some(*index) { GOOD } else { ACCENT };
-                    ui.label(RichText::new("●").size(13.0).color(color));
-                    ui.label(RichText::new(format!("{} {}", region.label, count)).size(12.0));
-                    ui.add_space(6.0);
-                }
-            });
-            let unknown = total.saturating_sub(recognised);
-            if unknown > 0 {
-                hint(
-                    ui,
-                    &format!("{recognised}/{total} 个节点可识别地区，{unknown} 个名称未包含可判断的国家或城市。"),
-                );
-            } else {
-                hint(ui, &format!("{recognised} 个节点全部已定位。"));
-            }
-        }
-        ui.add_space(2.0);
-        hint(
-            ui,
-            "连线表示当前出口（未连接时为节点最集中的地区）与其他节点地区的对应关系，不代表实时请求路径；坐标取国家或代表城市中心，不代表真实机房位置。",
-        );
-    });
-}
-
-fn unit_vector(lat: f32, lon: f32) -> (f32, f32, f32) {
-    let lat = lat.to_radians();
-    let lon = lon.to_radians();
-    let (sin_lat, cos_lat) = lat.sin_cos();
-    (cos_lat * lon.cos(), sin_lat, cos_lat * lon.sin())
-}
-
-fn arc_screen(
-    from: (f32, f32),
-    to: (f32, f32),
-    t: f32,
-    center: Pos2,
-    radius: f32,
-    yaw: f32,
-    pitch: f32,
-    altitude: f32,
-) -> Option<(Pos2, f32)> {
-    let (ax, ay, az) = unit_vector(from.0, from.1);
-    let (bx, by, bz) = unit_vector(to.0, to.1);
-    let dot = (ax * bx + ay * by + az * bz).clamp(-1.0, 1.0);
-    let angle = dot.acos();
-    let (mut x, mut y, mut z) = if angle < 1e-4 {
-        (ax, ay, az)
-    } else {
-        let sine = angle.sin();
-        let left = ((1.0 - t) * angle).sin() / sine;
-        let right = (t * angle).sin() / sine;
-        (ax * left + bx * right, ay * left + by * right, az * left + bz * right)
-    };
-    let length = (x * x + y * y + z * z).sqrt();
-    if length < 1e-5 {
-        return None;
-    }
-    x /= length;
-    y /= length;
-    z /= length;
-    let lift = 1.0 + altitude * (std::f32::consts::PI * t).sin();
-    let lat = y.asin().to_degrees();
-    let lon = z.atan2(x).to_degrees();
-    let (position, visible) = project(lat, lon, center, radius * lift, pitch, yaw);
-    Some((position, visible))
-}
-
-fn draw_arc(
-    painter: &egui::Painter,
-    from: (f32, f32),
-    to: (f32, f32),
-    center: Pos2,
-    radius: f32,
-    yaw: f32,
-    pitch: f32,
-    color: Color32,
-    altitude: f32,
-) {
-    let mut previous: Option<(Pos2, f32)> = None;
-    const STEPS: usize = 48;
-    for step in 0..=STEPS {
-        let t = step as f32 / STEPS as f32;
-        if let Some((position, visible)) = arc_screen(from, to, t, center, radius, yaw, pitch, altitude) {
-            if let Some((last, last_visible)) = previous {
-                if visible > 0.02 && last_visible > 0.02 {
-                    painter.line_segment([last, position], Stroke::new(1.1_f32, color));
-                }
-            }
-            previous = Some((position, visible));
-        }
-    }
-}
-
-fn project(lat: f32, lon: f32, center: Pos2, radius: f32, center_lat: f32, center_lon: f32) -> (Pos2, f32) {
-    let lat = lat.to_radians();
-    let delta = (lon - center_lon).to_radians();
-    let center_lat = center_lat.to_radians();
-    let x = lat.cos() * delta.sin();
-    let y = center_lat.cos() * lat.sin() - center_lat.sin() * lat.cos() * delta.cos();
-    let z = center_lat.sin() * lat.sin() + center_lat.cos() * lat.cos() * delta.cos();
-    (center + Vec2::new(x, -y) * radius, z)
-}
-
-const MASK_WIDTH: usize = 1024;
-const MASK_HEIGHT: usize = 512;
 
 fn land_mask() -> &'static [u8] {
     static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -546,6 +815,10 @@ fn render_globe(yaw: f32, pitch: f32, size: usize) -> egui::ColorImage {
     let half = size as f32 / 2.0;
     let start_lon = yaw.to_radians();
 
+    let is_land_at = |mx: usize, my: usize| -> bool {
+        mask[(my.min(MASK_HEIGHT - 1)) * MASK_WIDTH + (mx % MASK_WIDTH)] != 0
+    };
+
     for py in 0..size {
         let v = (py as f32 + 0.5 - half) / half;
         for px in 0..size {
@@ -567,22 +840,29 @@ fn render_globe(yaw: f32, pitch: f32, size: usize) -> egui::ColorImage {
                 lon_deg -= 360.0;
             }
             let mx = (((lon_deg + 180.0) / 360.0) * MASK_WIDTH as f32) as usize % MASK_WIDTH;
-            let my = (((90.0 - lat_deg) / 180.0) * MASK_HEIGHT as f32).clamp(0.0, (MASK_HEIGHT - 1) as f32) as usize;
-            let is_land = mask[my * MASK_WIDTH + mx] != 0;
-            let light = 0.62 + 0.38 * z;
-            let (red, green, blue) = if is_land {
-                (40.0 * light, 100.0 * light, 108.0 * light)
-            } else {
-                (10.0 * light, 30.0 * light, 52.0 * light)
-            };
-            let mut color = [red, green, blue];
-            let lat_remainder = lat_deg.rem_euclid(30.0);
-            let lon_remainder = lon_deg.rem_euclid(30.0);
-            let on_parallel = lat_remainder.min(30.0 - lat_remainder) < 0.5;
-            let on_meridian = lon_remainder.min(30.0 - lon_remainder) < 0.5;
+            let my = (((90.0 - lat_deg) / 180.0) * MASK_HEIGHT as f32)
+                .clamp(0.0, (MASK_HEIGHT - 1) as f32) as usize;
+            let is_land = is_land_at(mx, my);
+            // 等光照（constant）：球面颜色不随视角衰减。
+            let base = if is_land { LAND_FILL } else { OCEAN };
+            let mut color = base;
+            // 陆地轮廓（对应 NSBezierPath stroke）。
+            if is_land
+                && (!is_land_at(mx.wrapping_sub(1), my)
+                    || !is_land_at(mx + 1, my)
+                    || !is_land_at(mx, my.wrapping_sub(1))
+                    || !is_land_at(mx, my + 1))
+            {
+                color = LAND_STROKE;
+            }
+            // 经纬网格：纬线 -60..60 每 30°，经线每 30°，青色 10%。
+            let on_parallel = [-60.0f32, -30.0, 0.0, 30.0, 60.0]
+                .iter()
+                .any(|line| (lat_deg - line).abs() < 0.4);
+            let on_meridian = ((lon_deg / 30.0).round() * 30.0 - lon_deg).abs() < 0.4;
             if on_parallel || on_meridian {
-                for (channel, target) in color.iter_mut().zip([104.0, 142.0, 178.0]) {
-                    *channel += (target - *channel) * 0.16;
+                for channel in color.iter_mut() {
+                    *channel = *channel * 0.90 + 25.5;
                 }
             }
             let radius = squared.sqrt();
@@ -606,20 +886,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognises_common_node_names() {
-        assert_eq!(region_index("🇭🇰 香港 01").map(|i| REGIONS[i].code), Some("HK"));
-        assert_eq!(region_index("JP-Tokyo-01").map(|i| REGIONS[i].code), Some("JP"));
-        assert_eq!(region_index("🇸🇬 SG 02").map(|i| REGIONS[i].code), Some("SG"));
-        assert_eq!(region_index("美国 洛杉矶 03").map(|i| REGIONS[i].code), Some("US"));
-        assert_eq!(region_index("德国 法兰克福").map(|i| REGIONS[i].code), Some("DE"));
-        assert_eq!(region_index("剩余流量：100GB").map(|i| REGIONS[i].code), None);
-        assert!(is_info_node("套餐到期时间"));
-    }
-
-    #[test]
     fn land_data_is_readable() {
         let rings = land();
         assert!(rings.len() > 100);
         assert!(rings.iter().map(|ring| ring.len()).sum::<usize>() > 2000);
+    }
+
+    #[test]
+    fn arc_lifts_and_returns() {
+        let points = arc_points((0.0, 0.0), (30.0, 120.0));
+        assert_eq!(points.len(), 57);
+        let start = points[0];
+        let end = points[56];
+        let length = |p: (f32, f32, f32)| (p.0 * p.0 + p.1 * p.1 + p.2 * p.2).sqrt();
+        assert!((length(start) - 1.016).abs() < 0.01);
+        assert!((length(end) - 1.016).abs() < 0.01);
     }
 }

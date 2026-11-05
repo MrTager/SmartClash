@@ -318,3 +318,155 @@ impl NodeSortOrder {
         }
     }
 }
+
+// ---------------------------------------------------------------- 连接快照（与 macOS 版 ProxyLogic 对齐）
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeoLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub country: String,
+    #[serde(default)]
+    pub city: String,
+}
+
+impl GeoLocation {
+    pub fn label(&self) -> String {
+        if self.city.is_empty() {
+            self.country.clone()
+        } else {
+            format!("{}, {}", self.city, self.country)
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.latitude.is_finite()
+            && self.longitude.is_finite()
+            && (-90.0..=90.0).contains(&self.latitude)
+            && (-180.0..=180.0).contains(&self.longitude)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConnectionMetadata {
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default, rename = "destinationIP")]
+    pub destination_ip: Option<String>,
+    #[serde(default, rename = "destinationPort")]
+    pub destination_port: Option<String>,
+    #[serde(default)]
+    pub process: Option<String>,
+}
+
+impl ConnectionMetadata {
+    pub fn display_destination(&self) -> String {
+        if let Some(host) = &self.host {
+            if !host.is_empty() {
+                return host.clone();
+            }
+        }
+        if let Some(ip) = &self.destination_ip {
+            if !ip.is_empty() {
+                return ip.clone();
+            }
+        }
+        "未知目标".into()
+    }
+
+    /// 只有公网 IP 才参与定位；内网地址不发送给任何服务。
+    pub fn public_destination_ip(&self) -> Option<&str> {
+        self.destination_ip
+            .as_deref()
+            .filter(|ip| crate::services::geoip::is_public_ip(ip))
+    }
+
+    /// 定位键：优先公网目标 IP，缺失时用请求域名（由 DNS 估算位置）。
+    pub fn geolocation_key(&self) -> Option<String> {
+        if let Some(ip) = self.public_destination_ip() {
+            return Some(ip.to_string());
+        }
+        self.host
+            .as_deref()
+            .filter(|host| !host.is_empty())
+            .map(|host| host.to_lowercase())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoreConnection {
+    pub id: String,
+    #[serde(default)]
+    pub metadata: ConnectionMetadata,
+    #[serde(default)]
+    pub upload: u64,
+    #[serde(default)]
+    pub download: u64,
+    #[serde(default)]
+    pub chains: Vec<String>,
+    #[serde(default)]
+    pub rule: Option<String>,
+}
+
+impl CoreConnection {
+    pub fn path_label(&self) -> String {
+        if self.chains.iter().any(|c| c == "DIRECT") {
+            return "直连".into();
+        }
+        if self.chains.iter().any(|c| c == "REJECT" || c == "REJECT-DROP") {
+            return "已拦截".into();
+        }
+        self.chains
+            .iter()
+            .filter(|c| !matches!(c.as_str(), "SMART" | "PROBE" | "GLOBAL"))
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+
+    /// 连接自身的链路在出口切换后仍保留旧路由；永远不要用当前选中节点推断。
+    pub fn route_nodes<'a>(&self, index: &std::collections::HashMap<String, &'a ProxyNode>) -> Vec<&'a ProxyNode> {
+        if self
+            .chains
+            .iter()
+            .any(|c| c == "DIRECT" || c == "REJECT" || c == "REJECT-DROP")
+        {
+            return Vec::new();
+        }
+        let Some(exit) = self.chains.iter().find(|name| index.contains_key(*name)) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut cursor = Some(exit.clone());
+        while let Some(name) = cursor {
+            let Some(node) = index.get(&name) else {
+                return Vec::new();
+            };
+            if !visited.insert(name.clone()) || result.len() >= 16 {
+                return Vec::new();
+            }
+            result.push(*node);
+            cursor = node
+                .payload
+                .get("dialer-proxy")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        result.reverse();
+        result
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ConnectionSnapshot {
+    #[serde(default, rename = "uploadTotal")]
+    pub upload_total: u64,
+    #[serde(default, rename = "downloadTotal")]
+    pub download_total: u64,
+    #[serde(default)]
+    pub connections: Vec<CoreConnection>,
+}

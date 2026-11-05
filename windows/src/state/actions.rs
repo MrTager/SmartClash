@@ -10,6 +10,7 @@ use crate::services::network;
 use crate::services::paths;
 use crate::services::subscription_service;
 use crate::services::system_proxy::SystemProxy;
+use crate::state::activity;
 use crate::state::traffic;
 use crate::state::{with_store, Shared};
 use std::collections::HashSet;
@@ -367,6 +368,7 @@ fn do_start(
                 });
             });
             start_traffic(shared);
+            start_activity(shared);
             if purpose == Purpose::Connection {
                 start_monitor(shared);
             }
@@ -391,6 +393,11 @@ fn do_stop(shared: &Shared) -> Result<(), String> {
     if let Some(flag) = with_store(shared, |store| store.traffic_stop.take()) {
         flag.store(true, Ordering::SeqCst);
     }
+    if let Some(flag) = with_store(shared, |store| store.activity_stop.take()) {
+        flag.store(true, Ordering::SeqCst);
+    }
+    let activity = with_store(shared, |store| Arc::clone(&store.activity));
+    crate::state::activity::stop(&activity);
 
     // 必须先恢复系统代理，再移除它指向的本地端点。
     let restore = SystemProxy::restore();
@@ -1560,6 +1567,22 @@ fn start_traffic(shared: &Shared) {
         flag,
         crate::logic::model::random_hex(8),
     );
+}
+
+/// 启动实时连接轮询与 IP 定位（地球面板数据源）。
+fn start_activity(shared: &Shared) {
+    let (secret, data) = with_store(shared, |store| {
+        (
+            store.preferences.secret.clone(),
+            Arc::clone(&store.activity),
+        )
+    });
+    if let Some(flag) = with_store(shared, |store| store.activity_stop.take()) {
+        flag.store(true, Ordering::SeqCst);
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    with_store(shared, |store| store.activity_stop = Some(Arc::clone(&flag)));
+    activity::start(shared, CoreClient::new(&secret), data, flag);
 }
 
 pub fn shutdown(shared: &Shared) {

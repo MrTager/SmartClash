@@ -43,7 +43,10 @@ pub struct ViewState {
     pub show_chain_editor: bool,
     pub globe_yaw: f32,
     pub globe_pitch: f32,
-    pub globe_auto: bool,
+    pub globe_distance: f32,
+    pub globe_had_markers: bool,
+    pub focused_connection: Option<String>,
+    pub show_connections: bool,
     pub globe_texture: Option<egui::TextureHandle>,
     pub globe_texture_key: (f32, f32, u32),
 }
@@ -59,14 +62,21 @@ impl Default for ViewState {
             chain_entry_ids: Default::default(),
             chain_exit_ids: Default::default(),
             show_chain_editor: false,
-            globe_yaw: 105.0,
-            globe_pitch: 20.0,
-            globe_auto: false,
+            globe_yaw: DEFAULT_GLOBE_LON,
+            globe_pitch: DEFAULT_GLOBE_LAT,
+            globe_distance: 3.9,
+            globe_had_markers: false,
+            focused_connection: None,
+            show_connections: false,
             globe_texture: None,
             globe_texture_key: (f32::NAN, f32::NAN, 0),
         }
     }
 }
+
+/// 地球初始视角与 macOS 版 resetCamera 的默认位置一致。
+pub const DEFAULT_GLOBE_LAT: f32 = 23.0;
+pub const DEFAULT_GLOBE_LON: f32 = 110.0;
 
 pub enum Action {
     Refresh,

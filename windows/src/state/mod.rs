@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod activity;
 pub mod traffic;
 
 use crate::logic::chain::ChainTrace;
@@ -50,6 +51,8 @@ pub struct Store {
     pub lifecycle: Arc<Mutex<()>>,
     pub epoch: u64,
     pub traffic: Arc<Mutex<traffic::TrafficData>>,
+    pub activity: activity::SharedActivity,
+    pub activity_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub monitor_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub latency_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub last_update: u64,
@@ -134,6 +137,8 @@ impl Store {
             lifecycle: Arc::new(Mutex::new(())),
             epoch: 0,
             traffic: Arc::new(Mutex::new(traffic::TrafficData::load())),
+            activity: Arc::new(Mutex::new(activity::ActivityData::default())),
+            activity_stop: None,
             monitor_stop: None,
             latency_cancel: None,
             last_update: crate::logic::health::now_ms(),
