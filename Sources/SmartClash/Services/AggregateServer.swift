@@ -20,7 +20,7 @@ final class AggregateServer {
     }
     func start(onError: @escaping (String) -> Void) throws {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host("127.0.0.1"), port: Configuration.aggregatePort)
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host("127.0.0.1"), port: NWEndpoint.Port(rawValue: UInt16(Configuration.aggregatePort))!)
         let listener = try NWListener(using: parameters)
         listener.stateUpdateHandler = { state in
             if case .failed(_) = state { onError("本机订阅端口 \(Configuration.aggregatePort) 无法监听，请检查端口冲突") }

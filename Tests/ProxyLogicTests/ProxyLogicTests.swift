@@ -31,13 +31,13 @@ final class ProxyLogicTests: XCTestCase {
         let nodes = try SubscriptionParser.parse(fixture, source: source)
         let data = try Configuration.make(nodes: nodes, secret: "local-secret", tun: false)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(json["external-controller"] as? String, "127.0.0.1:19090")
+        XCTAssertEqual(json["external-controller"] as? String, "127.0.0.1:\(Configuration.controllerPort)")
         XCTAssertEqual(json["secret"] as? String, "local-secret")
         XCTAssertEqual(json["allow-lan"] as? Bool, false)
         XCTAssertEqual((json["rules"] as? [String])?.last, "MATCH,SMART")
         let listeners = try XCTUnwrap(json["listeners"] as? [[String: Any]])
         XCTAssertEqual(listeners.first?["proxy"] as? String, "PROBE")
-        XCTAssertEqual(listeners.first?["port"] as? Int, 17891)
+        XCTAssertEqual(listeners.first?["port"] as? Int, Configuration.probePort)
     }
     func testExportHasNodesButNoLocalControllerSecret() throws {
         let nodes = try SubscriptionParser.parse(fixture, source: source)

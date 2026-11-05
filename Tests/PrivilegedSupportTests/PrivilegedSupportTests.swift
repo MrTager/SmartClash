@@ -20,7 +20,7 @@ final class PrivilegedSupportTests: XCTestCase {
           - {name: shadowsocks, type: ss, server: example.com, port: 443, cipher: aes-128-gcm, password: test, plugin: obfs, plugin-opts: {mode: tls, host: example.com}}
         """, source: Source(name: "test", url: "https://example.com"))
         try TunConfiguration.validate(configuration())
-        try TunConfiguration.validate(configuration(nodes: nodes, ruleURL: "http://127.0.0.1:17892/test-token/rules"))
+        try TunConfiguration.validate(configuration(nodes: nodes, ruleURL: "http://127.0.0.1:\(Configuration.aggregatePort)/test-token/rules"))
     }
     func testTunRejectsArbitraryFilesAndUnexpectedExecutables() throws {
         let base = try configuration()
@@ -41,7 +41,7 @@ final class PrivilegedSupportTests: XCTestCase {
         }
     }
     func testRuleProvidersCannotWriteOutsideFixedDirectoryOrFetchRemoteFiles() throws {
-        let base = try configuration(ruleURL: "http://127.0.0.1:17892/token/rules")
+        let base = try configuration(ruleURL: "http://127.0.0.1:\(Configuration.aggregatePort)/token/rules")
         for (key, value) in [("path", "/etc/unsafe"), ("url", "file:///etc/passwd"), ("url", "https://example.com/rules")] {
             XCTAssertThrowsError(try TunConfiguration.validate(changed(base) {
                 var providers = $0["rule-providers"] as! [String: [String: Any]]
@@ -54,7 +54,7 @@ final class PrivilegedSupportTests: XCTestCase {
         let service = "Wi-Fi ' ; $(touch /tmp/should-not-execute)"
         let snapshots = [ProxySnapshot(service: service, kind: "webproxy", host: "proxy.example.com", port: 8080, enabled: true)]
         let decoded = try ProxySnapshot.decodeValidated(JSONEncoder().encode(snapshots))
-        XCTAssertEqual(decoded[0].arguments(enabling: true), [["-setwebproxy", service, "127.0.0.1", "17890"], ["-setwebproxystate", service, "on"]])
+        XCTAssertEqual(decoded[0].arguments(enabling: true), [["-setwebproxy", service, "127.0.0.1", String(Configuration.proxyPort)], ["-setwebproxystate", service, "on"]])
         XCTAssertEqual(decoded[0].arguments(enabling: false), [["-setwebproxy", service, "proxy.example.com", "8080"], ["-setwebproxystate", service, "on"]])
     }
     func testLegacyEmptyDisabledProxyCanBeRestored() throws {

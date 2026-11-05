@@ -41,7 +41,7 @@ final class NodeLatencyTests: XCTestCase {
     func testDelayPathEscapesTheEntireNodeNameAsOneSegment() throws {
         let name = "香港 / A?#% 中文"
         let path = DelayEndpoint.path(name: name)
-        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:19090" + path))
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(Configuration.controllerPort)" + path))
         let parts = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
         let segments = parts.percentEncodedPath.split(separator: "/")
         XCTAssertEqual(segments.count, 3)
