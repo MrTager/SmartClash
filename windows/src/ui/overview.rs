@@ -153,7 +153,7 @@ pub fn draw(
         if widgets::toggle_row(
             ui,
             "TUN 虚拟网卡",
-            "接管更多应用流量；开启与关闭需要管理员授权（UAC）。",
+            "接管更多应用流量；首次开启需一次管理员授权，之后免确认。",
             store.tun,
             "一键开启 TUN",
             "关闭 TUN",

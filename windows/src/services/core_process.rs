@@ -1,6 +1,5 @@
 use crate::services::core_client::CoreClient;
 use crate::services::{command, paths};
-use std::io::Write;
 use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -133,7 +132,7 @@ impl CoreProcess {
         let _ = std::fs::remove_file(&pid_file);
         let log = self.root.join("core.log");
         let err_log = self.root.join("core.err.log");
-        let script = self.root.join("start-tun.ps1");
+        let script = helper_script_path();
         let content = format!(
             "$ErrorActionPreference = 'Stop'\n\
              $p = Start-Process -FilePath {} -ArgumentList @('-d',{},'-f',{}) -WorkingDirectory {} -WindowStyle Hidden -RedirectStandardOutput {} -RedirectStandardError {} -PassThru\n\
@@ -147,9 +146,14 @@ impl CoreProcess {
             command::ps_quote(&pid_file.display().to_string())
         );
         paths::write_private(&script, content.as_bytes())?;
-        run_elevated(&script)?;
+        // 首次使用：创建提权计划任务（仅此一次需要 UAC 确认）。
+        // 创建失败不阻塞，退回每次确认的旧模式。
+        if let Err(error) = ensure_helper_task() {
+            eprintln!("helper task unavailable: {error}");
+        }
+        elevate_helper_script()?;
 
-        // 等待管理员授权并写入 PID；取消 UAC 时脚本不会产生 PID。
+        // 等待提权脚本写入 PID；授权被取消或任务执行失败时不会产生 PID。
         for _ in 0..120 {
             if let Some(text) = std::fs::read_to_string(&pid_file).ok() {
                 if let Ok(pid) = text.trim().parse::<u32>() {
@@ -159,7 +163,7 @@ impl CoreProcess {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        Err("管理员授权未完成或 TUN 内核未启动（可能取消了 UAC 授权）".into())
+        Err("TUN 内核未启动（授权被取消或提权任务执行失败）".into())
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
@@ -303,34 +307,115 @@ fn run_elevated(script: &Path) -> Result<(), String> {
 
 fn stop_elevated(pid: u32) -> Result<(), String> {
     let root = paths::data_root();
-    let script = root.join("stop-tun.ps1");
     let pid_file = root.join("tun.pid");
+    let script = helper_script_path();
     let content = format!(
         "$ErrorActionPreference = 'SilentlyContinue'\n\
          Stop-Process -Id {pid} -Force\n\
          Remove-Item -LiteralPath {} -Force\n",
         command::ps_quote(&pid_file.display().to_string())
     );
-    let mut file = std::fs::File::create(&script).map_err(|e| format!("无法写入脚本：{e}"))?;
-    let _ = file.write_all(content.as_bytes());
-    drop(file);
-    if let Err(e) = run_elevated(&script) {
-        // 未获授权时脚本必然没有执行，可以安全清理。
-        let _ = std::fs::remove_file(&script);
-        return Err(e);
-    }
+    paths::write_private(&script, content.as_bytes())?;
+    elevate_helper_script()?;
     // 必须验证进程真的退出：提权脚本失败/被取消时不能谎报已恢复，
     // 否则 TUN 会继续劫持系统流量而界面以为已停止。
     for _ in 0..30 {
         if !process_alive(pid) {
             let _ = std::fs::remove_file(&pid_file);
-            // 只有确认内核退出后才能删脚本：run_elevated 返回时提权
-            // powershell 可能尚未读到 -File 文件，先删会让脚本凭空消失
-            // （UAC 已批准却什么都没执行）。
-            let _ = std::fs::remove_file(&script);
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    Err(format!("内核进程 {pid} 仍在运行（可能取消了管理员授权），TUN 可能仍接管网络"))
+    Err(format!("内核进程 {pid} 仍在运行（提权任务未生效），TUN 可能仍接管网络"))
+}
+
+// ---- 提权计划任务：一次授权，长期免确认 --------------------------------------
+//
+// 首次启用 TUN 时以管理员身份注册一个「无触发器」的计划任务
+// （因此永远不会自行运行，只能由本应用通过 schtasks /Run 手动启动），
+// 任务以当前用户最高权限运行 wscript（GUI 子系统，无窗口闪烁），
+// 再由 vbs 隐藏执行应用改写的 tun-elevated.ps1。
+// 之后启动 / 停止 / 恢复网络都不再需要 UAC 确认。
+
+const TASK_NAME: &str = "SmartClashTunHelper";
+
+/// 提权脚本统一落点：每次操作前由应用改写内容（启动或停止）。
+fn helper_script_path() -> PathBuf {
+    paths::data_root().join("tun-elevated.ps1")
+}
+
+fn task_exists() -> bool {
+    command::run(
+        Path::new("schtasks.exe"),
+        &["/Query".into(), "/TN".into(), TASK_NAME.into()],
+    )
+    .map(|output| output.code == 0)
+    .unwrap_or(false)
+}
+
+fn write_helper_vbs() -> Result<(), String> {
+    let vbs = paths::data_root().join("tun-elevate.vbs");
+    let script = helper_script_path().display().to_string();
+    let content = format!(
+        "Set sh = CreateObject(\"WScript.Shell\")\r\n\
+         sh.Run \"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"{script}\"\"\", 0, False\r\n"
+    );
+    paths::write_private(&vbs, content.as_bytes())
+}
+
+fn run_helper_task() -> Result<(), String> {
+    let output = command::run(
+        Path::new("schtasks.exe"),
+        &["/Run".into(), "/TN".into(), TASK_NAME.into()],
+    )
+    .map_err(|e| format!("无法启动提权任务：{e}"))?;
+    if output.code == 0 {
+        Ok(())
+    } else {
+        Err(format!("提权任务启动失败：{}", output.text.trim()))
+    }
+}
+
+/// 注册提权计划任务（需要一次 UAC 确认）。无触发器 + 允许并行实例
+/// （避免上一次实例尚未结束时忽略新的启动请求）。
+fn ensure_helper_task() -> Result<(), String> {
+    if task_exists() {
+        return Ok(());
+    }
+    write_helper_vbs()?;
+    let setup = paths::data_root().join("setup-tun-task.ps1");
+    let vbs_argument = format!(
+        "\"{}\"",
+        paths::data_root().join("tun-elevate.vbs").display()
+    );
+    let content = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument {}\n\
+         $settings = New-ScheduledTaskSettingsSet -MultipleInstances Parallel\n\
+         Register-ScheduledTask -TaskName '{}' -Action $action -Settings $settings -RunLevel Highest -Force | Out-Null\n",
+        command::ps_quote(&vbs_argument),
+        TASK_NAME
+    );
+    paths::write_private(&setup, content.as_bytes())?;
+    run_elevated(&setup)?;
+    for _ in 0..40 {
+        if task_exists() {
+            // 任务已注册成功，脚本内容已执行完毕，可以清理。
+            let _ = std::fs::remove_file(&setup);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("提权计划任务创建失败（可能取消了管理员授权）".into())
+}
+
+/// 以最高权限执行 helper_script_path() 指向的脚本：
+/// 优先走计划任务（无 UAC 弹窗），任务不可用时回退传统提权（每次弹 UAC）。
+fn elevate_helper_script() -> Result<(), String> {
+    if task_exists() {
+        let _ = write_helper_vbs();
+        run_helper_task()
+    } else {
+        run_elevated(&helper_script_path())
+    }
 }
