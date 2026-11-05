@@ -7,3 +7,17 @@ Resources/core-release.json
 windows/target/
 windows/.linker/
 windows/resources/mihomo.exe
+
+# Local credentials and runtime data must never be published.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+preferences.json
+subscription-*.yaml
+subscription-*.yml
+config.local.*
+*.log
