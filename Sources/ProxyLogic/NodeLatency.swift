@@ -71,8 +71,13 @@ public enum DelayEndpoint {
 }
 
 public enum InternetPolicy {
-    public static func classify(code: Int, elapsed: Int) -> ProbeResult {
-        ProbeResult(health: code == 204 ? .healthy : .offline, milliseconds: elapsed,
-            detail: code == 204 ? "HTTPS 出网正常" : "HTTPS 出网未通过（HTTP \(code)）")
+    public static func classify(code: Int, elapsed: Int, transportError: String? = nil) -> ProbeResult {
+        let healthy = code == 204
+        let detail: String
+        if healthy { detail = "HTTPS 出网正常" }
+        else if let transportError, !transportError.isEmpty {
+            detail = "HTTPS 出网未通过（HTTP \(code)，\(transportError)）"
+        } else { detail = "HTTPS 出网未通过（HTTP \(code)）" }
+        return ProbeResult(health: healthy ? .healthy : .offline, milliseconds: elapsed, detail: detail)
     }
 }

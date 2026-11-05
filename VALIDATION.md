@@ -116,3 +116,27 @@ Mac 上额外验收：
 - 已生成 `dist/SmartClash.app` 和 `dist/SmartClash-Intel.dmg`，版本 0.7.1 / build 11；应用和 helper 为 Intel、ad-hoc 签名并开启 hardened runtime，应用完整签名校验通过。
 - 当前 `/Applications/SmartClash.app` 仍为运行中的 0.7.0，未替换、未中断其代理。新版首次安装后台服务需要用户在 macOS 管理员窗口确认；root 服务实际安装、连续开关、重开应用及重启后的免重复授权尚待实机验收，不以编译和自动化测试替代。
 - 本地 ad-hoc 重新构建 / 更新会改变客户端签名，安装新版时可能重新授权一次；系统设置撤销后台权限后需重新允许。已有服务暂不可用时不通过重复提权修复。
+
+## 2026-11-04 · v0.7.1 本机替换安装验收
+
+- 按用户要求重新构建，并通过 `script/build_and_run.sh --update` 替换、启动 `/Applications/SmartClash.app`。确认运行版本为 0.7.1 / build 11，进程来自 `/Applications`；应用、helper 和 Mihomo 的 SHA-256 均与最新构建一致，完整签名校验通过。
+- 旧版已正常退出并恢复系统代理；旧应用备份为 `dist/SmartClash-installed-backup-20261104-153048.app`。保留原有 7 个订阅来源、126 个缓存节点、规则和流量历史；启动后没有遗留代理恢复记录。
+- 实际界面已显示「配置一次授权」及首次授权说明。当前内核及系统代理处于关闭状态，未启用 TUN；后台服务首次安装仍需用户在系统授权窗口确认，持续免重复授权和 TUN 接管仍待实机验收。
+- 本轮构建检查：108 项测试，99 项通过、9 项按条件跳过、0 失败。
+
+## 2026-11-04 · v0.7.1 GitHub 安装包发布
+
+- 已在 `MrTager/SmartClash` 发布 `v0.7.1` 预览版，发布时间为北京时间 15:50:16；发布状态为非草稿，沿用既有预览版渠道。
+- 附件为 `SmartClash-Intel.dmg`、`SmartClash-v0.7.1-source.zip`、`SHA256SUMS.txt`，均确认上传完成；GitHub 返回的附件大小和 SHA-256 与本地一致。
+- DMG 已完成磁盘映像校验和挂载检查，内含 0.7.1 / build 11；其中应用、helper、Mihomo 与最新构建一致，应用签名校验通过。
+- 发布标签和源码附件对应已存在于远端的提交 `620db3f05a96383d0eceaa78bf700ead079f46be`。安装包 SHA-256：`a99a6fd790e64188f1db3ec100c68021a8593772aa55b104071ffd39e61a0f12`。
+- 发布地址：`https://github.com/MrTager/SmartClash/releases/tag/v0.7.1`。
+
+## 2026-11-05 · macOS TUN 接管验证与自动恢复修复
+
+- 现象：开启 TUN 后固定报「TUN 接管后出网验证失败，已尝试自动恢复网络」，无法进入 TUN 模式。远端 Windows 版提交 `f6d7ce7`（v0.8.4）已确认同源根因：接管后的出网验证只做一次 6 秒探测，新提权内核的路由 / DNS 收敛、首包建连以及出口节点瞬时抖动都会造成误判并立即回滚；`f6d7ce7` 与 `5821311` 还修复了停止流程在恢复失败时跳过停内核、谎报「已恢复网络」的问题。本次把这两组修复移植到 macOS Swift 版。
+- 修改：新增 `ProxyLogic/TunVerification.swift`（5 次重试、2 秒间隔、40 秒上限的纯策略与诊断文案）；`AppStore.verifyTunEgress()` 在重试窗口内探测业务监听 17890，逐次更新进度、响应取消并记录失败原因；`AppStore.stop()` 在系统代理恢复失败时仍继续停止提权内核，汇总错误并按 `proxy.hasBackup` / `engine.recoveryNeeded` 如实设置状态；`toggleTun()` 在回滚失败时不再声称已恢复，改为提示 TUN 可能仍接管流量；helper `stopTun()` 在 bootout 后轮询确认服务确实退出；`CoreClient.internetProbe()` 从合并的 stdout / stderr 中分离 HTTP 状态码与 curl 传输错误，失败信息不再只有「HTTP 0」。
+- 测试：新增 `Tests/ProxyLogicTests/TunVerificationTests.swift` 5 项，覆盖重试边界、进度与失败 / 恢复文案、探测诊断保留。`swift test --arch x86_64`：113 项，9 项按条件跳过，0 失败。
+- 构建与安装：`bash script/build.sh` 产出 `dist/SmartClash.app`（0.7.1 / build 11，ad-hoc 签名 + hardened runtime，完整签名校验通过）；旧应用备份为 `dist/SmartClash-installed-backup-20261105-133147.app` 后替换 `/Applications/SmartClash.app`，应用、helper、Mihomo 的 SHA-256 与构建产物一致，新进程从 `/Applications` 启动。
+- 替换前旧应用的正常退出被挂起的特权 XPC 调用阻塞，故按 `proxy-backup.json` 的 15 条快照用 `networksetup` 精确还原 5 个网络服务的原始代理设置（均为 off / 127.0.0.1:12450），停止遗留内核，清理陈旧的 `core.pid` 与代理备份；替换后系统代理全关、无遗留恢复记录、无 `com.smartclash.core` 服务。清理前的状态文件副本保存在 `dist/` 下。
+- 仍待实机验收：ad-hoc 重签使客户端 cdhash 由 `68c2b91c…` 变为 `fe688109…`，与已安装 helper 的 `clientRequirement` 不匹配，首次开启系统代理 / TUN 需在管理员窗口重新授权一次以重装后台服务；之后才能验证 TUN 接管、DNS 劫持、联网与关闭后的路由恢复。故障期间内核日志显示选中节点 `Japan日本2 · bd36b8b75548` 及多条链式节点持续 `dns resolve failed`，建议先在系统代理模式确认出口节点可用再开启 TUN。

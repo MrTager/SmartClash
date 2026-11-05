@@ -48,8 +48,18 @@ final class HelperService: NSObject, PrivilegedXPC, NSXPCListenerDelegate {
     }
     func stopTun(withReply reply: @escaping (String?) -> Void) {
         execute(reply) {
-            if (try? self.run("/bin/launchctl", ["print", "system/" + HelperLocation.coreLabel])) != nil {
-                try self.run("/bin/launchctl", ["bootout", "system/" + HelperLocation.coreLabel])
+            let label = "system/" + HelperLocation.coreLabel
+            if (try? self.run("/bin/launchctl", ["print", label])) != nil {
+                try self.run("/bin/launchctl", ["bootout", label])
+                // A cancelled or failed bootout leaves the TUN owning the default route.
+                // Confirm the service is really gone instead of letting the GUI report
+                // "network restored" while all traffic is still hijacked.
+                var stopped = false
+                for _ in 0..<30 {
+                    if (try? self.run("/bin/launchctl", ["print", label])) == nil { stopped = true; break }
+                    usleep(250_000)
+                }
+                guard stopped else { throw ProxyError.message("提权 TUN 内核服务仍在运行，可能仍接管系统流量") }
             }
             for path in [HelperLocation.corePlist, HelperLocation.coreDirectory] {
                 if FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }

@@ -54,10 +54,22 @@ final class CoreClient: @unchecked Sendable {
     func internetProbe(port: Int) async throws -> ProbeResult {
         let start = Date()
         let result = try await Command.run("/usr/bin/curl", ["--silent", "--show-error", "--noproxy", "", "--proxy", "http://127.0.0.1:\(port)",
-            "--connect-timeout", "3", "--max-time", "6", "--output", "/dev/null", "--write-out", "%{http_code}",
+            "--connect-timeout", "3", "--max-time", "6", "--output", "/dev/null", "--write-out", "\n%{http_code}",
             "--header", "Cache-Control: no-cache", DelayEndpoint.target], cancellable: true)
-        return InternetPolicy.classify(code: result.code == 0 ? (Int(result.text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) : 0,
-            elapsed: Int(Date().timeIntervalSince(start) * 1000))
+        // Command.run merges stdout and stderr into one pipe, so curl's --show-error
+        // text sits next to the status code. Parse the code from its own line and keep
+        // the transport error: "HTTP 0" alone cannot distinguish DNS failure, a dead
+        // exit node and a proxy that refused the CONNECT.
+        var code = 0
+        var diagnostics: [String] = []
+        for line in result.text.components(separatedBy: .newlines) {
+            let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            if text.count == 3, let value = Int(text), (100...599).contains(value) { code = value }
+            else if !text.allSatisfy({ $0.isNumber }) { diagnostics.append(text) }
+        }
+        let transport = result.code == 0 ? nil : (diagnostics.last ?? "curl 退出码 \(result.code)")
+        return InternetPolicy.classify(code: code, elapsed: Int(Date().timeIntervalSince(start) * 1000), transportError: transport)
     }
     func probe(port: Int) async throws -> ProbeResult {
         let start = Date()

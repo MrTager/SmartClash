@@ -254,15 +254,22 @@ final class AppStore: ObservableObject {
             running = false; tun = false; systemProxy = false; dynamicMode = false
             traffic.stop(); activity.stop(); return
         }
-        // Restoring the system proxy must succeed before its local endpoint is removed.
-        do {
-            try await proxy.restore(); systemProxy = false
-            try await engine.stop()
-            traffic.stop()
-            activity.stop()
-            running = false; tun = false; selected = ""; dynamicMode = false; routePlan = nil; routingStatus = "尚未打通"; recovery = false; internetStatus = "未连接"; outboundInterface = nil; log("代理已停止，网络设置已恢复")
-            activeMode = nil; publishRoute()
-        } catch { recovery = true; throw error }
+        // Restore the system proxy before removing its local endpoint, but never let a
+        // failed proxy restore skip stopping the privileged core: a surviving TUN keeps
+        // hijacking all system traffic while the UI would claim the network is restored.
+        var errors: [String] = []
+        do { try await proxy.restore() } catch { errors.append(error.localizedDescription) }
+        do { try await engine.stop() } catch { errors.append(error.localizedDescription) }
+        traffic.stop()
+        activity.stop()
+        systemProxy = proxy.hasBackup
+        running = false; tun = false; selected = ""; dynamicMode = false; routePlan = nil
+        routingStatus = "尚未打通"; internetStatus = "未连接"; outboundInterface = nil
+        recovery = engine.recoveryNeeded || !errors.isEmpty
+        activeMode = nil; publishRoute()
+        if errors.isEmpty { log("代理已停止，网络设置已恢复") }
+        else { log("停止未完全成功：\(errors.joined(separator: "；"))") }
+        if !errors.isEmpty { throw ProxyError.message(errors.joined(separator: "；")) }
     }
     func toggleSystem() async throws {
         if systemProxy { try await proxy.restore(); systemProxy = false; dynamicMode = false; routingStatus = "系统代理已关闭，内核继续运行"; return }
@@ -299,17 +306,52 @@ final class AppStore: ObservableObject {
             if trafficMode == .direct {
                 internetStatus = "TUN 直连模式已开启"; routingStatus = "直连模式"; return
             }
-            let result = try await api.internetProbe(port: Configuration.proxyPort)
-            guard result.health == .healthy else {
-                throw ProxyError.message("TUN 接管后出网验证失败，已尝试自动恢复网络；请检查 DNS、物理网卡或其他 VPN 冲突")
-            }
+            let result = try await verifyTunEgress()
             internetStatus = "TUN 出网已验证 · \(result.milliseconds) ms"
             routingStatus = "已打通"
+        } catch is CancellationError {
+            // An explicit stop owns the rollback; never report it as a TUN failure.
+            try? await stop()
+            throw CancellationError()
         } catch {
+            let reason = error.localizedDescription
             do { try await stop() }
-            catch { recovery = true; log("网络自动恢复未完成，请点击恢复网络并允许系统授权") }
-            throw error
+            catch let stopError {
+                recovery = true
+                log("网络自动恢复未完成：\(stopError.localizedDescription)")
+                throw ProxyError.message(TunVerificationPolicy.recoveryMessage(reason, stopError: stopError.localizedDescription))
+            }
+            throw ProxyError.message(reason + "；已自动恢复网络")
         }
+    }
+
+    /// Verify the business listener after takeover. The privileged core is a brand new
+    /// process: installing the default route, starting DNS hijacking and completing the
+    /// first proxy handshake all take time. One 6-second probe used to roll back a
+    /// healthy TUN whenever the exit node hiccuped, making TUN impossible to enable.
+    private func verifyTunEgress() async throws -> ProbeResult {
+        let started = Date()
+        var attempts = 0
+        var result = ProbeResult(health: .offline, milliseconds: 0, detail: "尚未探测")
+        while true {
+            try Task.checkCancellation()
+            attempts += 1
+            do { result = try await api.internetProbe(port: Configuration.proxyPort) }
+            catch is CancellationError { throw CancellationError() }
+            catch {
+                result = ProbeResult(health: .offline, milliseconds: 0, detail: error.localizedDescription)
+                log("TUN 出网探测 \(attempts) 异常：\(error.localizedDescription)")
+            }
+            if result.health == .healthy {
+                if attempts > 1 { log("TUN 路由收敛后第 \(attempts) 次出网验证通过") }
+                return result
+            }
+            guard TunVerificationPolicy.shouldRetry(attempts, elapsed: Date().timeIntervalSince(started)) else { break }
+            log("TUN 出网探测 \(attempts) 未通过：\(result.detail)")
+            internetStatus = TunVerificationPolicy.progress(attempts)
+            try await Task.sleep(nanoseconds: UInt64(TunVerificationPolicy.retryDelay * 1_000_000_000))
+        }
+        throw ProxyError.message(TunVerificationPolicy.failureMessage(attempts: attempts, last: result.detail))
     }
     func oneClickConnect() async throws {
         if recovery { try await stop() }
