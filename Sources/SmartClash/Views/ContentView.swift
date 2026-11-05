@@ -117,7 +117,7 @@ struct ContentView: View {
                                 else { store.perform { try await store.start() } }
                             }.disabled(!store.running && !store.busy && store.recovery)
                             Spacer()
-                            Text("HTTP / SOCKS · 127.0.0.1:17890").font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Text("HTTP / SOCKS · 127.0.0.1:\(Configuration.proxyPort)").font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
                     }.padding(12)
                     HStack {
@@ -212,7 +212,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("本机订阅链接（含随机访问令牌）").fontWeight(.medium)
                     HStack {
-                        Text(store.subscriptionReady ? "http://127.0.0.1:17892/••••/config.yaml" : "订阅服务不可用")
+                        Text(store.subscriptionReady ? "http://127.0.0.1:\(Configuration.aggregatePort)/••••/config.yaml" : "订阅服务不可用")
                             .font(.system(.caption, design: .monospaced))
                         Spacer()
                         Button("复制订阅链接") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(store.subscriptionURL, forType: .string) }

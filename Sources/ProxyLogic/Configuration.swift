@@ -1,8 +1,9 @@
 import Foundation
 public enum Configuration {
-    public static let proxyPort = 17890
-    public static let probePort = 17891
-    public static let controllerPort = 19090
+    public static let proxyPort = 7890
+    public static let probePort = 7891
+    public static let aggregatePort = 7892
+    public static let controllerPort = 9090
     public static func make(nodes: [ProxyNode], secret: String, tun: Bool, routes: [ProxyNode]? = nil, extraProxies: [ProxyNode] = [], outboundInterface: String? = nil, preferredName: String? = nil, trafficMode: TrafficMode = .rule, ruleProviderBaseURL: String? = nil) throws -> Data {
         guard !nodes.isEmpty || trafficMode == .direct else { throw ProxyError.message("请先添加并更新订阅") }
         var names = (routes ?? nodes).map(\.name)

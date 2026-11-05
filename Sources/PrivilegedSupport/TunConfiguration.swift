@@ -32,7 +32,7 @@ public enum TunConfiguration {
                 guard provider["type"] as? String == "http",
                       provider["path"] as? String == "./rule-providers/\(name).yaml",
                       let text = provider["url"] as? String, let url = URL(string: text),
-                      url.scheme == "http", url.host == "127.0.0.1", url.port == 17892,
+                      url.scheme == "http", url.host == "127.0.0.1", url.port == Configuration.aggregatePort,
                       url.user == nil, url.password == nil,
                       Set(provider.keys).isSubset(of: ["type", "behavior", "format", "interval", "url", "path", "proxy"]) else { throw invalid() }
             }

@@ -8,8 +8,8 @@ final class AggregateServer {
     private var rulePayloads: [String: Data] = [:]
     private let token: String
     init(token: String) { self.token = token }
-    var address: String { "http://127.0.0.1:17892/\(token)/config.yaml" }
-    var ruleBaseURL: String { "http://127.0.0.1:17892/\(token)/rules" }
+    var address: String { "http://127.0.0.1:\(Configuration.aggregatePort)/\(token)/config.yaml" }
+    var ruleBaseURL: String { "http://127.0.0.1:\(Configuration.aggregatePort)/\(token)/rules" }
     func updateRules(_ snapshot: RuleSnapshot) throws {
         let converted = try snapshot.providerPayloads()
         queue.sync { rulePayloads = converted }
@@ -20,10 +20,10 @@ final class AggregateServer {
     }
     func start(onError: @escaping (String) -> Void) throws {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host("127.0.0.1"), port: 17892)
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host("127.0.0.1"), port: Configuration.aggregatePort)
         let listener = try NWListener(using: parameters)
         listener.stateUpdateHandler = { state in
-            if case .failed(_) = state { onError("本机订阅端口 17892 无法监听，请检查端口冲突") }
+            if case .failed(_) = state { onError("本机订阅端口 \(Configuration.aggregatePort) 无法监听，请检查端口冲突") }
         }
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
