@@ -22,6 +22,11 @@ public enum ProxyError: LocalizedError {
 }
 public enum SubscriptionParser {
     // Only node definitions are imported. Remote rules, controller settings and scripts are discarded.
+    // 订阅商注入的信息伪节点（剩余流量 / 到期 / 公告 / 官网等），不是真实代理，直接跳过。
+    public static let informationalMarks = ["剩余", "流量", "到期", "重置", "公告", "官网", "客服", "套餐"]
+    public static func isInformational(_ name: String) -> Bool {
+        informationalMarks.contains { name.contains($0) }
+    }
     public static func parse(_ text: String, source: Source) throws -> [ProxyNode] {
         guard text.utf8.count <= 10_000_000 else { throw ProxyError.message("订阅超过 10 MB") }
         let document: Any?
@@ -32,7 +37,10 @@ public enum SubscriptionParser {
             throw ProxyError.message("需要含 proxies 的 Clash YAML/JSON 订阅（最多 5000 个节点）；不支持 Base64 URI 列表或仅有 provider 的配置")
         }
         let supported: Set<String> = ["ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "socks5", "http", "snell", "anytls"]
-        return try nodes.map { input in
+        return try nodes.compactMap { input in
+            // 订阅商注入的信息节点（剩余流量 / 到期 / 公告等）不是真实代理：
+            // 直接跳过，既不出现在节点列表，也不会参与测速与自动选路。
+            if let label = input["name"] as? String, isInformational(label) { return nil }
             let raw = try normalizeTransport(input)
             guard let type = raw["type"] as? String, supported.contains(type),
                   let server = raw["server"] as? String, !server.isEmpty,

@@ -43,7 +43,13 @@ struct NodesView: View {
                     Image(systemName: node.name == store.selected ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(node.name == store.selected ? .green : .secondary)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(node.name).lineLimit(1)
+                        HStack(spacing: 6) {
+                            if store.preferences.pinnedNodeID == node.id {
+                                Image(systemName: "pin.fill").foregroundStyle(.orange)
+                                    .accessibilityLabel("已固定出口")
+                            }
+                            Text(node.name).lineLimit(1)
+                        }
                         HStack {
                             Text(store.preferences.sources.first(where: { $0.id == node.sourceID })?.name ?? "动态链路")
                             if let sample = store.latencies[node.id] {
@@ -54,6 +60,10 @@ struct NodesView: View {
                     Spacer()
                     latency(node)
                         .frame(minWidth: 105, alignment: .trailing)
+                    Button(store.preferences.pinnedNodeID == node.id ? "取消固定" : "固定") {
+                        store.pin(store.preferences.pinnedNodeID == node.id ? nil : node)
+                    }
+                    .disabled(store.recovery)
                     Button("测速") { store.beginLatencyTest([node]) }
                         .disabled(store.recovery)
                     Button("选择") { store.perform { try await store.selectVerified(node) } }
@@ -63,6 +73,8 @@ struct NodesView: View {
             }
             }
             Text("可达节点按延迟从低到高排序，未测与失败节点靠后。延迟不是下载速度，也不代表 OpenAI / ChatGPT 的地区资格。")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("点「固定」锁定出口：一键打通会直接连该节点并验证出网，跳过自动选路，同时关闭自动切换；「选择」只在当前运行中切换。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         }

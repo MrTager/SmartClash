@@ -136,4 +136,19 @@ final class ProxyLogicTests: XCTestCase {
             XCTAssertNotNil(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         }
     }
+    func testInformationalNodesAreSkippedAtImport() throws {
+        // 订阅商会在 proxies 里塞入「剩余流量 / 到期时间」等信息节点，不是真实代理。
+        let text = """
+        proxies:
+          - {name: "剩余流量：100 GB", type: ss, server: info.example.com, port: 443, cipher: aes-128-gcm, password: x}
+          - {name: "套餐到期：2027-01-01", type: ss, server: info.example.com, port: 443, cipher: aes-128-gcm, password: x}
+          - {name: 香港 01, type: ss, server: hk.example.com, port: 443, cipher: aes-128-gcm, password: y}
+        """
+        let nodes = try SubscriptionParser.parse(text, source: source)
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertTrue(nodes[0].name.hasPrefix("香港 01"))
+        XCTAssertTrue(SubscriptionParser.isInformational("剩余流量：100 GB"))
+        XCTAssertTrue(SubscriptionParser.isInformational("官网：example.com"))
+        XCTAssertFalse(SubscriptionParser.isInformational("香港 01"))
+    }
 }

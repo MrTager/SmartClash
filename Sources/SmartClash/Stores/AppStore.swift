@@ -70,6 +70,21 @@ final class AppStore: ObservableObject {
     private var routePlan: RoutePlan?
     private var searchRound = 0
     var routeNodes: [ProxyNode] { routePlan?.candidates ?? nodes }
+    /// 用户固定（锁定）的出口节点；订阅更新后节点可能已消失，因此按 ID 现查。
+    var pinnedNode: ProxyNode? {
+        preferences.pinnedNodeID.flatMap { id in nodeListNodes.first { $0.id == id } }
+    }
+    /// 固定 / 取消固定出口节点。固定后关闭自动切换，一键打通直接使用该节点。
+    func pin(_ node: ProxyNode?) {
+        preferences.pinnedNodeID = node?.id
+        if node != nil { preferences.automatic = false }
+        savePreferences()
+        if let node {
+            log("已固定出口：\(node.name)；自动切换已关闭，可在节点页取消固定")
+        } else {
+            log("已取消固定出口，恢复自动选路")
+        }
+    }
     var visualizationNodes: [ProxyNode] {
         var seen = Set<String>()
         return (nodes + (routePlan?.definitions ?? []) + routeNodes).filter { seen.insert($0.name).inserted }
@@ -448,6 +463,8 @@ final class AppStore: ObservableObject {
             catch { try? await stop(); throw error }
             routingStatus = "直连模式"; internetStatus = "直连模式已开启"; return
         }
+        // 用户固定了出口：直接连该节点并验证出网，不再自动搜索与切换。
+        if let pinned = pinnedNode { return try await connectPinned(pinned) }
         if nodes.isEmpty { try await refresh() }
         searchRound = 0; dynamicMode = kernel == .mihomo; preferences.automatic = true
         // Start with the complete single-hop pool; never capture traffic on an untested chain.
@@ -456,6 +473,28 @@ final class AppStore: ObservableObject {
             try await start()
             try await discoverRoute()
             guard routingStatus == "已打通" else { throw ProxyError.message("出网未通过验证，未开启新的系统代理") }
+        } catch {
+            try? await stop()
+            throw error
+        }
+    }
+    /// 固定节点的连接路径：不跑自动搜索，只用该节点验证 HTTPS 出网后开启系统代理。
+    private func connectPinned(_ node: ProxyNode) async throws {
+        guard kernel.supports(node) else {
+            throw ProxyError.message("固定节点不被 \(kernel.title) 内核支持，请更换节点或内核")
+        }
+        dynamicMode = false
+        routePlan = RoutePlan(candidates: [node], definitions: [])
+        do {
+            try await start(preferredName: node.name)
+            let result = try await api.internetProbe(port: Configuration.proxyPort)
+            guard result.health == .healthy else {
+                throw ProxyError.message("固定节点未通过 HTTPS 出网验证：\(result.detail)")
+            }
+            try await proxy.enable(); systemProxy = true
+            internetStatus = "固定节点出网已验证 · \(result.milliseconds) ms"
+            routingStatus = "已打通"; activeMode = preferences.routingMode
+            log("已连接固定节点：\(node.name)")
         } catch {
             try? await stop()
             throw error

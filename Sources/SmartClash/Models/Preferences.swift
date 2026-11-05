@@ -11,6 +11,8 @@ struct Preferences: Codable {
     var kernel: KernelKind? = .mihomo
     // 本地混合代理端口（HTTP + SOCKS）；旧版偏好文件缺省时回退默认端口。
     var proxyPort: Int? = Configuration.defaultProxyPort
+    // 用户手动固定的出口节点；非空时一键打通直接使用该节点，跳过自动选路。
+    var pinnedNodeID: String?
     var chain: ChainOptions? = nil
     var secret: String = UUID().uuidString + UUID().uuidString
     var subscriptionToken: String = UUID().uuidString
