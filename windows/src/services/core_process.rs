@@ -261,7 +261,8 @@ fn run_elevated(script: &Path) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(",");
     let command_text = format!(
-        "Start-Process -FilePath 'powershell.exe' -ArgumentList @({list}) -Verb RunAs -WindowStyle Hidden -Wait"
+        // 不能等待提权脚本退出：脚本会启动常驻的 mihomo 进程，等待它退出会让 UI 永久 busy。
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList @({list}) -Verb RunAs -WindowStyle Hidden"
     );
     let result = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &command_text])

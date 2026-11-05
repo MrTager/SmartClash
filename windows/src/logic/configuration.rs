@@ -2,6 +2,49 @@ use super::model::{ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT, PROXY_PO
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+/// SmartClash 官方国内直连规则集（mihomo rule-provider）。
+/// 仓库：https://github.com/MrTager/SmartClash-Rules
+const RULES_REPO_BASE: &str =
+    "https://raw.githubusercontent.com/MrTager/SmartClash-Rules/main/rules";
+/// 规则文件本地缓存相对内核工作目录（-d）的位置。
+const RULES_CACHE_DIR: &str = "./rules";
+/// 规则集自动更新间隔：7 天（秒）。
+const RULES_INTERVAL: u64 = 60 * 60 * 24 * 7;
+
+/// 国内域名/IP 直连规则集：通过 mihomo rule-provider 订阅官方规则仓库，
+/// 下载与更新走 SMART 组（可用节点），本地缓存于内核目录 rules/ 下。
+fn china_rule_providers() -> Value {
+    json!({
+        "cn-domains": {
+            "type": "http",
+            "behavior": "domain",
+            "format": "yaml",
+            "url": format!("{RULES_REPO_BASE}/direct.yaml"),
+            "path": format!("{RULES_CACHE_DIR}/cn-domains.yaml"),
+            "interval": RULES_INTERVAL,
+            "proxy": "SMART"
+        },
+        "cn-custom": {
+            "type": "http",
+            "behavior": "domain",
+            "format": "yaml",
+            "url": format!("{RULES_REPO_BASE}/custom-direct.yaml"),
+            "path": format!("{RULES_CACHE_DIR}/cn-custom.yaml"),
+            "interval": RULES_INTERVAL,
+            "proxy": "SMART"
+        },
+        "cn-ips": {
+            "type": "http",
+            "behavior": "ipcidr",
+            "format": "yaml",
+            "url": format!("{RULES_REPO_BASE}/cncidr.yaml"),
+            "path": format!("{RULES_CACHE_DIR}/cn-ips.yaml"),
+            "interval": RULES_INTERVAL,
+            "proxy": "SMART"
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn make(
     nodes: &[ProxyNode],
@@ -113,6 +156,7 @@ pub fn make(
             "nameserver": ["https://dns.alidns.com/dns-query", "https://cloudflare-dns.com/dns-query"]
         }),
     );
+    obj.insert("rule-providers".into(), china_rule_providers());
     obj.insert(
         "rules".into(),
         json!([
@@ -120,6 +164,10 @@ pub fn make(
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
             "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
             "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+            // 国内域名/IP 直连，避免国内站点绕道境外节点。
+            "RULE-SET,cn-domains,DIRECT",
+            "RULE-SET,cn-custom,DIRECT",
+            "RULE-SET,cn-ips,DIRECT",
             "MATCH,SMART"
         ]),
     );
@@ -189,6 +237,23 @@ proxies:
         assert_eq!(value["mode"], "rule");
         let groups = value["proxy-groups"].as_array().expect("proxy-groups");
         assert!(groups.iter().any(|g| g["name"] == "GLOBAL" && g["proxies"][0] == "SMART"));
+
+        // 国内直连规则集：订阅 SmartClash-Rules 仓库并置于 MATCH 之前。
+        let providers = value["rule-providers"].as_object().expect("rule-providers");
+        for name in ["cn-domains", "cn-custom", "cn-ips"] {
+            let provider = providers.get(name).unwrap_or_else(|| panic!("provider {name}"));
+            assert!(provider["url"].as_str().unwrap().starts_with("https://"));
+            assert_eq!(provider["proxy"], "SMART");
+        }
+        let rules = value["rules"].as_array().expect("rules");
+        let match_index = rules
+            .iter()
+            .position(|r| r == "MATCH,SMART")
+            .expect("MATCH rule");
+        for rule in ["RULE-SET,cn-domains,DIRECT", "RULE-SET,cn-custom,DIRECT", "RULE-SET,cn-ips,DIRECT"] {
+            let index = rules.iter().position(|r| r == rule).unwrap_or_else(|| panic!("rule {rule}"));
+            assert!(index < match_index, "{rule} must precede MATCH");
+        }
     }
 
     #[test]

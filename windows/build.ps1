@@ -2,7 +2,10 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Version = "0.8.1"
+# 版本号从 Cargo.toml 读取，避免与实际编译版本不一致。
+$CargoToml = Get-Content (Join-Path $Root "Cargo.toml") -Raw
+if ($CargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "无法从 Cargo.toml 解析版本号" }
+$Version = $Matches[1]
 $DistRoot = Join-Path $Root "dist"
 $Dist = Join-Path $DistRoot "SmartClash-Windows-$Version"
 $Zip = Join-Path $DistRoot "SmartClash-Windows-$Version.zip"
