@@ -314,13 +314,20 @@ fn stop_elevated(pid: u32) -> Result<(), String> {
     let mut file = std::fs::File::create(&script).map_err(|e| format!("无法写入脚本：{e}"))?;
     let _ = file.write_all(content.as_bytes());
     drop(file);
-    run_elevated(&script)?;
-    let _ = std::fs::remove_file(&script);
+    if let Err(e) = run_elevated(&script) {
+        // 未获授权时脚本必然没有执行，可以安全清理。
+        let _ = std::fs::remove_file(&script);
+        return Err(e);
+    }
     // 必须验证进程真的退出：提权脚本失败/被取消时不能谎报已恢复，
     // 否则 TUN 会继续劫持系统流量而界面以为已停止。
     for _ in 0..30 {
         if !process_alive(pid) {
             let _ = std::fs::remove_file(&pid_file);
+            // 只有确认内核退出后才能删脚本：run_elevated 返回时提权
+            // powershell 可能尚未读到 -File 文件，先删会让脚本凭空消失
+            // （UAC 已批准却什么都没执行）。
+            let _ = std::fs::remove_file(&script);
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(500));
