@@ -13,7 +13,7 @@
 | 内核 | Mihomo（macOS 资产） | Mihomo v1.19.33 `windows-amd64` |
 | 系统代理 | `/usr/sbin/networksetup` | 当前用户注册表 `Internet Settings` + WinINET 刷新 |
 | TUN | launchd 常驻服务 | 管理员权限（UAC）启动 Mihomo + `wintun.dll` |
-| 订阅服务 | Network.framework | 标准库 TCP 监听 127.0.0.1:17892 |
+| 订阅服务 | Network.framework | 标准库 TCP 监听 127.0.0.1:7892 |
 | HTTP 请求 | URLSession / curl | 系统 `curl.exe`（与 macOS 行为对齐） |
 
 ## 目录结构
@@ -113,7 +113,7 @@ python tools\make_icon.py     # 输出 resources/app.ico、resources/app-64.png�
 
 ## 与 macOS 版的差异（请务必知悉）
 
-1. **系统代理**：只修改当前用户的 WinINET 代理（HTTP/HTTPS，`127.0.0.1:17890`）。Windows 没有与 macOS `networksetup` 完全等价的“逐网络服务”概念；SOCKS 由 Mihomo 的混合端口提供，但系统级 SOCKS 不单独写入注册表。开启前会拒绝已启用 PAC / 自动代理发现的系统配置，并先落盘 `proxy-backup.json`，停止时恢复。
+1. **系统代理**：只修改当前用户的 WinINET 代理（HTTP/HTTPS，`127.0.0.1:7890`）。Windows 没有与 macOS `networksetup` 完全等价的“逐网络服务”概念；SOCKS 由 Mihomo 的混合端口提供，但系统级 SOCKS 不单独写入注册表。开启前会拒绝已启用 PAC / 自动代理发现的系统配置，并先落盘 `proxy-backup.json`，停止时恢复。
 2. **TUN**：需要管理员权限。点击后弹出 UAC，由提权 PowerShell 启动 Mihomo，`core.pid` / `tun.pid` 记录进程；关闭 TUN 或“恢复网络”时会再次请求授权并终止该 PID。若取消 UAC，应用会保留原状态并提示。**当前构建环境没有管理员权限，TUN 的真机接管效果尚未验收。**
 3. **默认网卡**：Windows 版交给 Mihomo 自动探测（`auto-detect-interface: true`），不再像 macOS 版那样解析默认路由接口，也不会主动检测其他 VPN 的 TUN 冲突。若本机已有其他 TUN 类 VPN，请先关闭再开启 TUN，避免双重路由。
 4. **Clash Verge 导入器**：macOS 版的 `SmartClashImport` 命令行工具未移植到 Windows。Windows 版可在「订阅聚合」中直接添加 HTTPS 订阅。
@@ -128,9 +128,9 @@ python tools\make_icon.py     # 输出 resources/app.ico、resources/app-64.png�
 
 - `SmartClash.exe` 正常启动、渲染中文界面、全球节点地球与地区统计正常显示、关闭时返回码 0；
 - 一键连接在真实订阅上约 15 秒接通，代理端口返回 `HTTP 204`，状态栏显示「HTTPS 出网正常」；
-- 系统代理写入 `127.0.0.1:17890`，点击「停止并恢复网络」后 `ProxyEnable` 恢复为 0；
+- 系统代理写入 `127.0.0.1:7890`，点击「停止并恢复网络」后 `ProxyEnable` 恢复为 0；
 - 窗口使用普通层级，不会置顶遮挡其他应用；
-- 本机聚合订阅端口 `127.0.0.1:17892` 可监听，正确令牌返回 200，错误令牌返回 404；
+- 本机聚合订阅端口 `127.0.0.1:7892` 可监听，正确令牌返回 200，错误令牌返回 404；
 - 单元测试用真实 `mihomo.exe -t` 校验了由 Rust 生成的配置（`cargo test --release`），并覆盖规则 / 全局 / 直连三种模式的配置（含零订阅节点的直连配置）；
 - 应用启动后连续运行 6 秒无崩溃退出，模式卡片与「当前出口」随模式联动。
 
@@ -143,7 +143,7 @@ TUN 接管仍需管理员权限，当前构建环境未做真机验收。首次�
 ## 安全说明
 
 - 配置、订阅缓存、代理备份、流量历史保存在 `%APPDATA%\SmartClash`，仅当前用户可访问；其中可能含节点密码，请按敏感凭据处理。
-- 本地控制 API（19090）与聚合订阅（17892）仅监听 `127.0.0.1`，并使用随机密钥 / 令牌。
+- 本地控制 API（9090）与聚合订阅（7892）仅监听 `127.0.0.1`，并使用随机密钥 / 令牌。
 - 应用不会上传订阅到第三方转换服务，也不会执行订阅中的脚本或外部插件。
 - 导出的 YAML 含节点密码，分享前请自行处理。
 

@@ -1,6 +1,6 @@
 [package]
 name = "smartclash-windows"
-version = "0.8.8"
+version = "0.8.9"
 edition = "2021"
 description = "SmartClash Windows client - Rust port of the macOS SwiftUI original"
 license = "GPL-3.0"

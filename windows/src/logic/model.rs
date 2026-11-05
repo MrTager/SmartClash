@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-pub const PROXY_PORT: u16 = 17890;
-pub const PROBE_PORT: u16 = 17891;
-pub const AGGREGATE_PORT: u16 = 17892;
-pub const CONTROLLER_PORT: u16 = 19090;
+pub const PROXY_PORT: u16 = 7890;
+pub const PROBE_PORT: u16 = 7891;
+pub const AGGREGATE_PORT: u16 = 7892;
+pub const CONTROLLER_PORT: u16 = 9090;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Source {

@@ -183,7 +183,7 @@ pub fn draw(
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                hint(ui, "HTTP / SOCKS · 127.0.0.1:17890");
+                hint(ui, &format!("HTTP / SOCKS · 127.0.0.1:{}", crate::logic::model::PROXY_PORT));
             });
         });
     });
