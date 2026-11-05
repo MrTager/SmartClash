@@ -1,11 +1,41 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU16, Ordering};
 
-pub const PROXY_PORT: u16 = 7890;
+pub const DEFAULT_PROXY_PORT: u16 = 7890;
 pub const PROBE_PORT: u16 = 7891;
 pub const AGGREGATE_PORT: u16 = 7892;
 pub const CONTROLLER_PORT: u16 = 9090;
+
+/// 当前生效的本地混合代理端口（HTTP + SOCKS）。默认 7890，可在设置中修改。
+static ACTIVE_PROXY_PORT: AtomicU16 = AtomicU16::new(DEFAULT_PROXY_PORT);
+
+pub fn proxy_port() -> u16 {
+    ACTIVE_PROXY_PORT.load(Ordering::SeqCst)
+}
+
+pub fn set_proxy_port(port: u16) {
+    ACTIVE_PROXY_PORT.store(port, Ordering::SeqCst);
+}
+
+/// 校验用户输入的代理端口：合法范围 1024–65535，且不得与内部保留端口冲突。
+pub fn validate_proxy_port(port: u16) -> Result<(), String> {
+    if !(1024..=65535).contains(&port) {
+        return Err("代理端口需在 1024–65535 之间".into());
+    }
+    let reserved: [(u16, &str); 5] = [
+        (PROBE_PORT, "本地探测端口"),
+        (AGGREGATE_PORT, "订阅聚合端口"),
+        (CONTROLLER_PORT, "内核控制端口"),
+        (crate::logic::kernel::XRAY_SOCKS_PORT, "Xray SOCKS 端口"),
+        (crate::logic::kernel::XRAY_API_PORT, "Xray 控制端口"),
+    ];
+    if let Some((_, label)) = reserved.iter().find(|(value, _)| *value == port) {
+        return Err(format!("端口 {port} 与{label}冲突，请换一个"));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Source {
@@ -148,6 +178,9 @@ pub struct Preferences {
     /// 当前使用的代理内核；旧配置缺省为 Mihomo。
     #[serde(default)]
     pub kernel: crate::logic::kernel::KernelKind,
+    /// 本地混合代理端口（HTTP + SOCKS）；旧配置缺省 7890。
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
 }
 
 fn default_interval() -> u64 {
@@ -166,6 +199,10 @@ fn default_secret() -> String {
     crate::logic::model::random_hex(32)
 }
 
+fn default_proxy_port() -> u16 {
+    DEFAULT_PROXY_PORT
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -179,6 +216,7 @@ impl Default for Preferences {
             secret: default_secret(),
             subscription_token: default_secret(),
             kernel: crate::logic::kernel::KernelKind::Mihomo,
+            proxy_port: DEFAULT_PROXY_PORT,
         }
     }
 }
@@ -488,6 +526,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_port_validation_rejects_reserved_and_invalid() {
+        assert!(validate_proxy_port(7890).is_ok());
+        assert!(validate_proxy_port(8080).is_ok());
+        assert!(validate_proxy_port(65535).is_ok());
+        // 低于 1024 属于系统保留段。
+        assert!(validate_proxy_port(80).is_err());
+        // 内部保留端口：探测 / 聚合 / 控制 / Xray。
+        assert!(validate_proxy_port(PROBE_PORT).is_err());
+        assert!(validate_proxy_port(AGGREGATE_PORT).is_err());
+        assert!(validate_proxy_port(CONTROLLER_PORT).is_err());
+        assert!(validate_proxy_port(crate::logic::kernel::XRAY_SOCKS_PORT).is_err());
+        assert!(validate_proxy_port(crate::logic::kernel::XRAY_API_PORT).is_err());
+    }
+
+    #[test]
+    fn preferences_default_proxy_port_matches_runtime_default() {
+        let preferences = Preferences::default();
+        assert_eq!(preferences.proxy_port, DEFAULT_PROXY_PORT);
+        // 旧版 preferences.json（无 proxyPort 字段）应回退到默认端口。
+        let legacy: Preferences = serde_json::from_str(r#"{"sources":[]}"#).expect("legacy config");
+        assert_eq!(legacy.proxy_port, DEFAULT_PROXY_PORT);
+    }
 
     #[test]
     fn connection_snapshot_accepts_null_and_missing_connections() {

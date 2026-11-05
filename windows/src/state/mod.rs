@@ -81,6 +81,11 @@ impl Store {
             None => Preferences::default(),
         };
         preferences.interval = preferences.interval.clamp(1, 3600);
+        // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
+        if crate::logic::model::validate_proxy_port(preferences.proxy_port).is_err() {
+            preferences.proxy_port = crate::logic::model::DEFAULT_PROXY_PORT;
+        }
+        crate::logic::model::set_proxy_port(preferences.proxy_port);
         let _ = paths::write_private(
             &settings,
             &serde_json::to_vec_pretty(&preferences).unwrap_or_default(),

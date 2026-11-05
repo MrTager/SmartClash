@@ -83,6 +83,7 @@ fn dispatch(action: ui::Action, shared: &state::Shared, ctx: &egui::Context) {
         InspectNow => actions::inspect_now(shared, ctx),
         UpdateRules => actions::update_rules(shared, ctx),
         Kernel(kind) => actions::change_kernel(shared, ctx, kind),
+        ProxyPort(port) => actions::change_proxy_port(shared, ctx, port),
         AddSource(name, url) => {
             if let Err(error) = actions::add_source(shared, &name, &url) {
                 let mut store = shared.lock().unwrap();

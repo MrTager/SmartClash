@@ -1,4 +1,4 @@
-use crate::logic::model::{Source, PROXY_PORT};
+use crate::logic::model::{proxy_port, Source};
 use crate::logic::subscription;
 use crate::logic::model::ProxyNode;
 use crate::services::{command, paths};
@@ -89,7 +89,7 @@ pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpd
             String::new(),
             "--proxy".into(),
             if through_proxy {
-                format!("http://127.0.0.1:{PROXY_PORT}")
+                format!("http://127.0.0.1:{}", proxy_port())
             } else {
                 String::new()
             },

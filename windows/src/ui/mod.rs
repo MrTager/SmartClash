@@ -46,6 +46,9 @@ pub struct ViewState {
     pub show_connections: bool,
     pub globe_texture: Option<egui::TextureHandle>,
     pub globe_texture_key: (f32, f32, u32),
+    /// 代理端口编辑框缓冲；synced_to 记录缓冲对应的偏好值，避免逐帧覆盖输入。
+    pub proxy_port_input: String,
+    pub proxy_port_synced_to: u16,
 }
 
 impl Default for ViewState {
@@ -64,6 +67,8 @@ impl Default for ViewState {
             show_connections: false,
             globe_texture: None,
             globe_texture_key: (f32::NAN, f32::NAN, 0),
+            proxy_port_input: String::new(),
+            proxy_port_synced_to: 0,
         }
     }
 }
@@ -88,6 +93,7 @@ pub enum Action {
     InspectNow,
     UpdateRules,
     Kernel(crate::logic::kernel::KernelKind),
+    ProxyPort(u16),
     AddSource(String, String),
     RemoveSource(String),
     Export,

@@ -1,4 +1,4 @@
-use crate::logic::model::PROXY_PORT;
+use crate::logic::model::proxy_port;
 use crate::services::paths;
 use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
@@ -95,7 +95,7 @@ impl SystemProxy {
         let key = hkcu
             .open_subkey_with_flags(INTERNET_SETTINGS, KEY_WRITE)
             .map_err(|e| format!("无法写入系统代理设置：{e}"))?;
-        let proxy = format!("127.0.0.1:{PROXY_PORT}");
+        let proxy = format!("127.0.0.1:{}", proxy_port());
         let result = (|| -> Result<(), String> {
             key.set_value("ProxyEnable", &1u32)
                 .map_err(|e| format!("无法启用系统代理：{e}"))?;

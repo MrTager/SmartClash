@@ -189,9 +189,16 @@ pub fn draw(
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                hint(ui, &format!("HTTP / SOCKS · 127.0.0.1:{}", crate::logic::model::PROXY_PORT));
+                hint(
+                    ui,
+                    &format!("HTTP / SOCKS · 127.0.0.1:{}", crate::logic::model::proxy_port()),
+                );
             });
         });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        port_controls(view, store, ui, pending);
     });
 
     widgets::card(ui, Some("智能切换"), |ui| {
@@ -243,6 +250,49 @@ pub fn draw(
             ui,
             "未使用 API Key：检测仅确认 OpenAI API 的访问结果，不保证 ChatGPT 网页登录、验证码或账号可用性。切换影响新连接，已有请求可能需要重试。",
         );
+    });
+}
+
+/// 本地代理端口编辑：缓冲仅在与偏好值不同步时刷新，避免逐帧覆盖正在输入的内容。
+fn port_controls(
+    view: &mut ViewState,
+    store: &mut Store,
+    ui: &mut Ui,
+    pending: &mut Vec<Action>,
+) {
+    if view.proxy_port_synced_to != store.preferences.proxy_port {
+        view.proxy_port_input = store.preferences.proxy_port.to_string();
+        view.proxy_port_synced_to = store.preferences.proxy_port;
+    }
+    ui.horizontal(|ui| {
+        ui.label("本地代理端口");
+        let input = ui.add(
+            egui::TextEdit::singleline(&mut view.proxy_port_input)
+                .desired_width(72.0)
+                .hint_text(crate::logic::model::DEFAULT_PROXY_PORT.to_string()),
+        );
+        let enter = input.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let can_apply = !store.busy && !store.stopping && !store.recovery;
+        let mut submit = enter && input.changed();
+        if widgets::accent_button(ui, "应用", can_apply) {
+            submit = true;
+        }
+        if submit {
+            match view.proxy_port_input.trim().parse::<u16>() {
+                Ok(port) => {
+                    if port != store.preferences.proxy_port {
+                        pending.push(Action::ProxyPort(port));
+                    }
+                }
+                Err(_) => {
+                    store.error = Some("代理端口需为 1024–65535 之间的整数".into());
+                }
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            hint(ui, "范围 1024–65535；运行中修改会自动重启内核生效。");
+        });
     });
 }
 

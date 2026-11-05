@@ -1,5 +1,5 @@
 use super::kernel::KernelKind;
-use super::model::{ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT, PROXY_PORT};
+use super::model::{ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT, proxy_port};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -182,7 +182,7 @@ pub fn make_mihomo(
     let proxies: Vec<Value> = proxies.into_values().collect();
 
     let mut obj: Map<String, Value> = Map::new();
-    obj.insert("mixed-port".into(), json!(PROXY_PORT));
+    obj.insert("mixed-port".into(), json!(proxy_port()));
     obj.insert("allow-lan".into(), json!(false));
     obj.insert("bind-address".into(), json!("127.0.0.1"));
     obj.insert("mode".into(), json!(traffic_mode.raw()));

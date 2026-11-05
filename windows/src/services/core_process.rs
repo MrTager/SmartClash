@@ -73,11 +73,11 @@ impl CoreProcess {
         let ports: &[u16] = match self.kind {
             KernelKind::Mihomo | KernelKind::SingBox => &[
                 crate::logic::model::CONTROLLER_PORT,
-                crate::logic::model::PROXY_PORT,
+                crate::logic::model::proxy_port(),
                 crate::logic::model::PROBE_PORT,
             ],
             KernelKind::Xray => &[
-                crate::logic::model::PROXY_PORT,
+                crate::logic::model::proxy_port(),
                 XRAY_SOCKS_PORT,
                 XRAY_API_PORT,
             ],

@@ -4,7 +4,7 @@ use crate::logic::health::{now_ms, HealthPolicy};
 use crate::logic::kernel::{KernelKind, RulesSupport};
 use crate::logic::model::{
     LinkMeasurements, NodeLatency, ProbeResult, ProxyNode, RoutingMode, TrafficMode, PROBE_PORT,
-    PROXY_PORT,
+    proxy_port,
 };
 use crate::logic::ranking::{ModeRanking, NodeRanking};
 use crate::services::core_client::CoreClient;
@@ -799,7 +799,7 @@ fn verify_tun(shared: &Shared, epoch: u64) -> Result<(), String> {
 
     // TUN 接管后路由/接口就绪与出口建连需要时间，且出口线路可能抖动，
     // 给约 10 秒重试窗口，避免刚接管就误判失败。
-    let mut result = client.internet_probe(PROXY_PORT);
+    let mut result = client.internet_probe(proxy_port());
     for attempt in 1..=5u32 {
         if result.health == crate::logic::model::Health::Healthy {
             break;
@@ -811,7 +811,7 @@ fn verify_tun(shared: &Shared, epoch: u64) -> Result<(), String> {
             store.internet_status = format!("TUN 已接管，正在验证出网（{attempt}/5）");
         });
         std::thread::sleep(std::time::Duration::from_secs(2));
-        result = client.internet_probe(PROXY_PORT);
+        result = client.internet_probe(proxy_port());
     }
     if result.health != crate::logic::model::Health::Healthy {
         return Err(
@@ -1059,7 +1059,7 @@ fn do_ensure_route(
     // 直连模式不选路：只要本地代理端口能直连出网，就可以继续开系统代理 / TUN。
     if !with_store(shared, |store| store.preferences.traffic_mode).uses_proxy() {
         let client = client_of(shared);
-        let result = client.internet_probe(PROXY_PORT);
+        let result = client.internet_probe(proxy_port());
         if result.health != crate::logic::model::Health::Healthy {
             return Err("直连模式出网验证失败，请检查本机网络；未开启新的系统代理".into());
         }
@@ -1249,7 +1249,7 @@ fn do_ensure_route(
                         .find(|n| n.name == store.selected)
                 });
                 do_select(shared, &node)?;
-                let result = client.internet_probe(PROXY_PORT);
+                let result = client.internet_probe(proxy_port());
                 if result.health == crate::logic::model::Health::Healthy {
                     mark_connected(shared, &node, &result, mode);
                     return Ok(());
@@ -1280,7 +1280,7 @@ fn do_ensure_route(
         if let Some(node) = ai_fallback {
             if !paused(shared) && now_ms() < deadline {
                 do_select(shared, &node)?;
-                let result = client.internet_probe(PROXY_PORT);
+                let result = client.internet_probe(proxy_port());
                 if result.health == crate::logic::model::Health::Healthy {
                     mark_connected(shared, &node, &result, mode);
                     log(shared, "没有候选通过 OpenAI 预检，已连接普通线路并继续后台复检");
@@ -1575,7 +1575,7 @@ fn do_select_verified(shared: &Shared, node: ProxyNode) -> Result<(), String> {
         return Err("该节点本次 HTTPS 测试未通过，已保留原业务出口".into());
     }
     do_select(shared, &node)?;
-    let result = client_of(shared).internet_probe(PROXY_PORT);
+    let result = client_of(shared).internet_probe(proxy_port());
     if result.health != crate::logic::model::Health::Healthy {
         if let Some(previous) = previous {
             let _ = do_select(shared, &previous);
@@ -1824,7 +1824,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
             do_stop(shared)?;
             return Ok(());
         }
-        let internet = client.internet_probe(PROXY_PORT);
+        let internet = client.internet_probe(proxy_port());
         let text = if internet.health == crate::logic::model::Health::Healthy {
             format!("直连模式出网正常 · {} ms", internet.milliseconds)
         } else {
@@ -1868,7 +1868,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
         return do_rebuild_routes(shared);
     }
 
-    let internet = client.internet_probe(PROXY_PORT);
+    let internet = client.internet_probe(proxy_port());
     let network_text = if internet.health == crate::logic::model::Health::Healthy {
         "HTTPS 出网正常"
     } else {
@@ -1890,7 +1890,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     if internet.health == crate::logic::model::Health::Healthy
         && now_ms().saturating_sub(last_openai) >= openai_interval
     {
-        let ai = client.openai_probe(PROXY_PORT);
+        let ai = client.openai_probe(proxy_port());
         with_store(shared, |store| store.last_openai_probe = now_ms());
         let text = format!("OpenAI：{}", ai.detail);
         with_store(shared, |store| store.openai_status = text);
@@ -2300,6 +2300,48 @@ pub fn change_kernel(shared: &Shared, ctx: &egui::Context, kind: KernelKind) {
                     }
                 });
                 fail(store, format!("内核切换失败：{error}"));
+            }
+        }
+    });
+}
+
+/// 修改本地混合代理端口。运行中会自动重启内核使新端口生效；失败时回滚。
+pub fn change_proxy_port(shared: &Shared, ctx: &egui::Context, port: u16) {
+    perform(shared, ctx, move |store, _ctx| {
+        let current = with_store(store, |s| s.preferences.proxy_port);
+        if current == port {
+            return;
+        }
+        if let Err(message) = crate::logic::model::validate_proxy_port(port) {
+            fail(store, message);
+            return;
+        }
+        let running = with_store(store, |s| s.running);
+        with_store(store, |s| {
+            s.preferences.proxy_port = port;
+            crate::logic::model::set_proxy_port(port);
+            s.save_preferences();
+            s.log(&format!("本地代理端口改为 {port}"));
+        });
+        if running {
+            if let Err(error) = restart_core(store, None, true) {
+                // 新端口启动失败时回滚到原端口，避免界面与已停止的内核状态不一致。
+                with_store(store, |s| {
+                    s.preferences.proxy_port = current;
+                    crate::logic::model::set_proxy_port(current);
+                    s.save_preferences();
+                    s.log(&format!("端口 {port} 启动失败，已回滚为 {current}"));
+                });
+                let restored = restart_core(store, None, true).is_ok();
+                with_store(store, |s| {
+                    if !restored {
+                        s.recovery = true;
+                        s.log("端口修改回滚失败，请停止并恢复网络");
+                    }
+                });
+                fail(store, format!("使用端口 {port} 重启内核失败：{error}"));
+            } else {
+                with_store(store, |s| s.log("内核已用新端口重启"));
             }
         }
     });

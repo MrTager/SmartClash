@@ -3,7 +3,7 @@
 use super::configuration::BuiltConfig;
 use super::convert;
 use super::kernel::{KernelKind, XRAY_API_PORT, XRAY_SOCKS_PORT};
-use super::model::{ProxyNode, TrafficMode, PROBE_PORT, PROXY_PORT};
+use super::model::{ProxyNode, TrafficMode, PROBE_PORT, proxy_port};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
@@ -114,7 +114,7 @@ pub fn build_singbox(
             "type": "mixed",
             "tag": "mixed-in",
             "listen": "127.0.0.1",
-            "listen_port": PROXY_PORT,
+            "listen_port": proxy_port(),
             "sniff": true
         }),
         json!({
@@ -331,7 +331,7 @@ pub fn build_xray(
             {
                 "tag": "http-in",
                 "listen": "127.0.0.1",
-                "port": PROXY_PORT,
+                "port": proxy_port(),
                 "protocol": "http",
                 "settings": {},
                 "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
