@@ -36,7 +36,8 @@ impl CoreProcess {
     }
 
     pub fn recovery_needed(&self) -> bool {
-        self.pid_path.exists()
+        // TUN 模式只写 tun.pid（不写 core.pid）；两类 PID 文件任一存在都视为需要恢复。
+        self.pid_path.exists() || self.root.join("tun.pid").exists()
     }
 
     pub fn start(&mut self, data: &[u8], tun: bool, client: &CoreClient) -> Result<(), String> {
@@ -292,5 +293,14 @@ fn stop_elevated(pid: u32) -> Result<(), String> {
     drop(file);
     run_elevated(&script)?;
     let _ = std::fs::remove_file(&script);
-    Ok(())
+    // 必须验证进程真的退出：提权脚本失败/被取消时不能谎报已恢复，
+    // 否则 TUN 会继续劫持系统流量而界面以为已停止。
+    for _ in 0..30 {
+        if !process_alive(pid) {
+            let _ = std::fs::remove_file(&pid_file);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!("内核进程 {pid} 仍在运行（可能取消了管理员授权），TUN 可能仍接管网络"))
 }

@@ -399,23 +399,24 @@ fn do_stop(shared: &Shared) -> Result<(), String> {
     let activity = with_store(shared, |store| Arc::clone(&store.activity));
     crate::state::activity::stop(&activity);
 
-    // 必须先恢复系统代理，再移除它指向的本地端点。
-    let restore = SystemProxy::restore();
-    if let Err(error) = restore {
-        with_store(shared, |store| {
-            store.recovery = true;
-            store.system_proxy = SystemProxy::has_backup();
-        });
-        return Err(error);
+    // 必须先恢复系统代理，再移除它指向的本地端点；
+    // 即使代理恢复失败也要继续停内核——TUN 劫持比代理残留严重得多。
+    let mut errors: Vec<String> = Vec::new();
+    if let Err(error) = SystemProxy::restore() {
+        errors.push(error);
     }
 
     let mut core = with_store(shared, |store| std::mem::take(&mut store.core));
     let result = core.stop();
     let recovery = core.recovery_needed();
+    if let Err(error) = result {
+        errors.push(error);
+    }
     with_store(shared, |store| store.core = core);
 
     with_store(shared, |store| {
-        store.system_proxy = false;
+        // 恢复失败时系统代理可能仍指向已停止的本地端点，用备份是否还在如实反映。
+        store.system_proxy = SystemProxy::has_backup();
         store.running = false;
         store.tun = false;
         store.selected.clear();
@@ -424,17 +425,19 @@ fn do_stop(shared: &Shared) -> Result<(), String> {
         store.routing_status = "尚未打通".into();
         store.internet_status = "未连接".into();
         store.active_mode = None;
-        store.recovery = recovery;
+        store.recovery = recovery || !errors.is_empty();
         store.publish_route();
-        store.log("代理已停止，网络设置已恢复");
+        if errors.is_empty() {
+            store.log("代理已停止，网络设置已恢复");
+        } else {
+            store.log(&format!("停止未完全成功：{}", errors.join("；")));
+        }
     });
 
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            with_store(shared, |store| store.recovery = true);
-            Err(error)
-        }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
     }
 }
 
@@ -543,10 +546,37 @@ fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
 
     let secret = with_store(shared, |s| s.preferences.secret.clone());
     let client = CoreClient::new(&secret);
-    let result = client.internet_probe(PROXY_PORT);
+    // TUN 接管后路由/接口就绪与出口建连需要时间，且出口线路可能抖动，
+    // 给约 40 秒重试窗口，避免刚接管就误判失败。
+    let mut result = client.internet_probe(PROXY_PORT);
+    for attempt in 1..=5u32 {
+        if result.health == crate::logic::model::Health::Healthy {
+            break;
+        }
+        if cancelled(shared, epoch) {
+            let _ = do_stop(shared);
+            return Err("操作已停止".into());
+        }
+        with_store(shared, |store| {
+            store.internet_status = format!("TUN 已接管，正在验证出网（{attempt}/5）");
+        });
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        result = client.internet_probe(PROXY_PORT);
+    }
     if result.health != crate::logic::model::Health::Healthy {
-        let _ = do_stop(shared);
-        return Err("TUN 接管后出网验证失败，已尝试自动恢复网络；请检查 DNS、物理网卡或其他 VPN 冲突".into());
+        // 恢复网络失败必须如实上报：TUN 未真正停止时系统流量仍被劫持。
+        if let Err(stop_error) = do_stop(shared) {
+            with_store(shared, |store| {
+                store.recovery = true;
+                store.log(&format!("网络自动恢复未完成：{stop_error}"));
+            });
+            return Err(format!(
+                "TUN 接管后出网验证失败，且自动恢复未完成（{stop_error}）；请点击“恢复网络”并允许管理员授权"
+            ));
+        }
+        return Err(
+            "TUN 接管后出网验证失败，已恢复网络；请检查出口节点状态、DNS、物理网卡或其他 VPN 冲突".into(),
+        );
     }
     with_store(shared, |store| {
         store.internet_status = format!("TUN 出网已验证 · {} ms", result.milliseconds);
