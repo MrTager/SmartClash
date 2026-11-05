@@ -164,14 +164,37 @@ impl CoreProcess {
 
     pub fn stop(&mut self) -> Result<(), String> {
         let mut errors: Vec<String> = Vec::new();
+        let mut attempted_tun_kill = false;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
         if let Some(pid) = self.tun_pid.take() {
             if process_alive(pid) {
+                attempted_tun_kill = true;
                 if let Err(e) = stop_elevated(pid) {
                     errors.push(e);
+                }
+            }
+        }
+        // 上次会话遗留的提权 TUN 内核：本实例没有句柄，只能从 tun.pid 找回。
+        let tun_pid_path = self.root.join("tun.pid");
+        if !attempted_tun_kill && tun_pid_path.exists() {
+            let orphan = std::fs::read_to_string(&tun_pid_path)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok());
+            match orphan {
+                Some(pid)
+                    if process_alive(pid)
+                        && process_image(pid).eq_ignore_ascii_case("mihomo.exe") =>
+                {
+                    if let Err(e) = stop_elevated(pid) {
+                        errors.push(e);
+                    }
+                }
+                _ => {
+                    // 进程已不在（或 PID 已被复用），只清理标记文件。
+                    let _ = std::fs::remove_file(&tun_pid_path);
                 }
             }
         }
