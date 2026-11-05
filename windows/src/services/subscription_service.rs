@@ -26,6 +26,15 @@ fn valid_remote(source: &Source) -> bool {
     !authority.is_empty() && !authority.contains('@')
 }
 
+fn push_skipped(source: &Source, skipped: usize, warnings: &mut Vec<String>) {
+    if skipped > 0 {
+        warnings.push(format!(
+            "{}：已跳过 {skipped} 个不支持或格式异常的节点",
+            source.name
+        ));
+    }
+}
+
 pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpdate, String> {
     let root = paths::ensure_root()?;
     let mut batches: Vec<Vec<ProxyNode>> = Vec::new();
@@ -37,9 +46,12 @@ pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpd
             match std::fs::read(&cache)
                 .ok()
                 .and_then(|data| String::from_utf8(data).ok())
-                .map(|text| subscription::parse(&text, source))
+                .map(|text| subscription::parse_detailed(&text, source))
             {
-                Some(Ok(nodes)) => batches.push(nodes),
+                Some(Ok(outcome)) => {
+                    push_skipped(source, outcome.skipped, &mut warnings);
+                    batches.push(outcome.nodes);
+                }
                 Some(Err(error)) => warnings.push(format!("{}：{}", source.name, error)),
                 None => warnings.push(format!("{}：本地快照缺失", source.name)),
             }
@@ -96,10 +108,11 @@ pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpd
         match downloaded {
             Some(data) => {
                 let text = String::from_utf8_lossy(&data).to_string();
-                match subscription::parse(&text, source) {
-                    Ok(nodes) => {
+                match subscription::parse_detailed(&text, source) {
+                    Ok(outcome) => {
                         let _ = paths::write_private(&cache, &data);
-                        batches.push(nodes);
+                        push_skipped(source, outcome.skipped, &mut warnings);
+                        batches.push(outcome.nodes);
                     }
                     Err(error) => {
                         warnings.push(format!("{}：{}", source.name, error));
@@ -111,10 +124,11 @@ pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpd
                 match std::fs::read(&cache)
                     .ok()
                     .and_then(|data| String::from_utf8(data).ok())
-                    .map(|text| subscription::parse(&text, source))
+                    .map(|text| subscription::parse_detailed(&text, source))
                 {
-                    Some(Ok(nodes)) => {
-                        batches.push(nodes);
+                    Some(Ok(outcome)) => {
+                        push_skipped(source, outcome.skipped, &mut warnings);
+                        batches.push(outcome.nodes);
                         warnings.push(format!("{}：更新失败，保留缓存", source.name));
                     }
                     _ => warnings.push(format!("{}：下载失败（网络或 HTTP 错误）", source.name)),

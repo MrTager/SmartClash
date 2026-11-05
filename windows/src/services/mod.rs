@@ -1,6 +1,7 @@
 pub mod aggregate_server;
 pub mod command;
 pub mod core_client;
+pub mod core_probe;
 pub mod core_process;
 pub mod geoip;
 pub mod network;

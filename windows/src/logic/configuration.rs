@@ -1,15 +1,26 @@
+use super::kernel::KernelKind;
 use super::model::{ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT, PROXY_PORT};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+/// 内核配置生成结果：除配置内容外，还携带需要提示给用户的降级信息。
+#[derive(Clone, Debug)]
+pub struct BuiltConfig {
+    pub data: Vec<u8>,
+    pub warnings: Vec<String>,
+}
+
 /// SmartClash 官方国内直连规则集（mihomo rule-provider）。
 /// 仓库：https://github.com/MrTager/SmartClash-Rules
+pub const RULES_REPOSITORY: &str = "https://github.com/MrTager/SmartClash-Rules";
 const RULES_REPO_BASE: &str =
     "https://raw.githubusercontent.com/MrTager/SmartClash-Rules/main/rules";
 /// 规则文件本地缓存相对内核工作目录（-d）的位置。
 const RULES_CACHE_DIR: &str = "./rules";
-/// 规则集自动更新间隔：7 天（秒）。
-const RULES_INTERVAL: u64 = 60 * 60 * 24 * 7;
+/// 规则集自动更新间隔：1 小时（秒），与 macOS 版一致。
+const RULES_INTERVAL: u64 = 60 * 60;
+/// 配置里的 rule-provider 名称，手动更新时按同一组名称逐个触发。
+pub const RULE_PROVIDERS: [&str; 3] = ["cn-domains", "cn-custom", "cn-ips"];
 
 /// 国内域名/IP 直连规则集：通过 mihomo rule-provider 订阅官方规则仓库，
 /// 下载与更新走 SMART 组（可用节点），本地缓存于内核目录 rules/ 下。
@@ -46,7 +57,80 @@ fn china_rule_providers() -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn make_for(
+    kind: KernelKind,
+    nodes: &[ProxyNode],
+    secret: &str,
+    tun: bool,
+    routes: Option<&[ProxyNode]>,
+    extra_proxies: &[ProxyNode],
+    outbound_interface: Option<&str>,
+    preferred_name: Option<&str>,
+    traffic_mode: TrafficMode,
+) -> Result<BuiltConfig, String> {
+    match kind {
+        KernelKind::Mihomo => Ok(BuiltConfig {
+            data: make_mihomo(
+                nodes,
+                secret,
+                tun,
+                routes,
+                extra_proxies,
+                outbound_interface,
+                preferred_name,
+                traffic_mode,
+            )?,
+            warnings: Vec::new(),
+        }),
+        KernelKind::SingBox => super::kernel_config::build_singbox(
+            nodes,
+            secret,
+            tun,
+            routes,
+            extra_proxies,
+            outbound_interface,
+            preferred_name,
+            traffic_mode,
+        ),
+        KernelKind::Xray => super::kernel_config::build_xray(
+            nodes,
+            secret,
+            tun,
+            routes,
+            extra_proxies,
+            outbound_interface,
+            preferred_name,
+            traffic_mode,
+        ),
+    }
+}
+
+/// 兼容旧调用点：默认生成 Mihomo 配置。
+#[allow(clippy::too_many_arguments)]
 pub fn make(
+    nodes: &[ProxyNode],
+    secret: &str,
+    tun: bool,
+    routes: Option<&[ProxyNode]>,
+    extra_proxies: &[ProxyNode],
+    outbound_interface: Option<&str>,
+    preferred_name: Option<&str>,
+    traffic_mode: TrafficMode,
+) -> Result<Vec<u8>, String> {
+    make_mihomo(
+        nodes,
+        secret,
+        tun,
+        routes,
+        extra_proxies,
+        outbound_interface,
+        preferred_name,
+        traffic_mode,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn make_mihomo(
     nodes: &[ProxyNode],
     secret: &str,
     tun: bool,
@@ -240,7 +324,7 @@ proxies:
 
         // 国内直连规则集：订阅 SmartClash-Rules 仓库并置于 MATCH 之前。
         let providers = value["rule-providers"].as_object().expect("rule-providers");
-        for name in ["cn-domains", "cn-custom", "cn-ips"] {
+        for name in RULE_PROVIDERS {
             let provider = providers.get(name).unwrap_or_else(|| panic!("provider {name}"));
             let filename = match name {
                 "cn-domains" => "direct.yaml",
@@ -250,6 +334,8 @@ proxies:
             };
             assert_eq!(provider["url"], format!("https://raw.githubusercontent.com/MrTager/SmartClash-Rules/main/rules/{filename}"));
             assert_eq!(provider["proxy"], "SMART");
+            // 与 macOS 版一致：每小时刷新一次规则。
+            assert_eq!(provider["interval"], 3600);
         }
         let rules = value["rules"].as_array().expect("rules");
         let match_index = rules

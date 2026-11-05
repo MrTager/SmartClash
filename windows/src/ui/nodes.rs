@@ -2,7 +2,7 @@ use super::widgets::{self, hint, BAD, BAD_DIM, GOOD, GOOD_DIM, MUTED, WARN, WARN
 use super::{Action, ViewState};
 use crate::logic::model::NodeSortOrder;
 use crate::state::Store;
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 
 pub fn draw(
     view: &mut ViewState,
@@ -105,10 +105,7 @@ pub fn draw(
         ui.add(egui::ProgressBar::new(fraction).show_percentage());
     }
     ui.add_space(2.0);
-    hint(
-        ui,
-        "测试节点完成 HTTPS 请求的延迟，6 路并发、单次最多 5 秒；不会切换当前业务出口或开启系统代理 / TUN。",
-    );
+    hint(ui, "6 路并发，单次请求最多等待 5 秒。");
     ui.add_space(8.0);
 
     widgets::card(ui, None, |ui| {
@@ -125,6 +122,7 @@ pub fn draw(
                 for row in range {
                     let node = &nodes[indexes[row]];
                     let selected = node.name == store.selected;
+                    let supported = store.preferences.kernel.supports_node(node);
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(if selected { "●" } else { "○" })
@@ -145,7 +143,17 @@ pub fn draw(
                                 .get(&node.id)
                                 .map(|l| crate::services::paths::datetime_text(l.checked))
                                 .unwrap_or_default();
-                            hint(ui, &format!("{source_name}  {extra}"));
+                            if supported {
+                                hint(ui, &format!("{source_name}  {extra}"));
+                            } else {
+                                hint(
+                                    ui,
+                                    &format!(
+                                        "{source_name}  {} 内核不支持此协议",
+                                        store.preferences.kernel.title()
+                                    ),
+                                );
+                            }
                         });
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
@@ -153,7 +161,8 @@ pub fn draw(
                                 let can_select = store.running
                                     && !store.busy
                                     && !store.is_testing_latency
-                                    && !store.stopping;
+                                    && !store.stopping
+                                    && supported;
                                 if ui
                                     .add_enabled(
                                         can_select,
@@ -168,7 +177,8 @@ pub fn draw(
                                 }
                                 if ui
                                     .add_enabled(
-                                        !store.busy
+                                        supported
+                                            && !store.busy
                                             && !store.is_testing_latency
                                             && !store.recovery,
                                         egui::Button::new(

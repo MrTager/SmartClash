@@ -18,6 +18,8 @@ pub struct ActivityData {
     pub locations: HashMap<String, GeoLocation>,
     pub connected: bool,
     pub enabled: bool,
+    /// 当前内核是否提供实时连接数据。
+    pub supported: bool,
     pub resolving: bool,
     attempted: HashMap<String, u64>,
 }
@@ -25,13 +27,19 @@ pub struct ActivityData {
 pub type SharedActivity = Arc<Mutex<ActivityData>>;
 
 pub fn start(shared: &Shared, client: CoreClient, data: SharedActivity, stop: Arc<AtomicBool>) {
+    let supported = client.kind.capabilities().connections;
     {
         let mut guard = data.lock().unwrap();
         guard.connections.clear();
         guard.connected = false;
-        guard.enabled = true;
+        guard.enabled = supported;
+        guard.supported = supported;
         guard.resolving = false;
         guard.attempted.clear();
+    }
+    if !supported {
+        // Xray 没有连接列表接口；不启动轮询，界面显示能力提示。
+        return;
     }
     let poll_data = Arc::clone(&data);
     let poll_client = client.clone();

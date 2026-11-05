@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod activity;
 pub mod traffic;
+mod tun_transition;
 
 use crate::logic::chain::ChainTrace;
 use crate::logic::dynamic_router::RoutePlan;
@@ -44,6 +45,7 @@ pub struct Store {
     pub active_trace: ChainTrace,
     pub standby_ready: usize,
     pub routing_status: String,
+    pub rule_status: String,
     pub dynamic_mode: bool,
     pub route_plan: RoutePlan,
     pub core: CoreProcess,
@@ -61,6 +63,7 @@ pub struct Store {
     pub scan_offset: usize,
     pub search_round: u32,
     pub last_openai_probe: u64,
+    pub last_openai_failover: u64,
     pub traffic_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub dirty_traffic: bool,
     pub egui_ctx: Option<egui::Context>,
@@ -103,6 +106,7 @@ impl Store {
             let _ = aggregate.update(&nodes);
         }
         let subscription_ready = aggregate.start().is_ok();
+        let core_kind = preferences.kernel;
 
         let mut store = Self {
             preferences,
@@ -130,9 +134,10 @@ impl Store {
             active_trace: ChainTrace::default(),
             standby_ready: 0,
             routing_status: "尚未打通".into(),
+            rule_status: "尚未手动更新，内核运行后每小时自动刷新".into(),
             dynamic_mode: false,
             route_plan: RoutePlan::default(),
-            core: CoreProcess::new(),
+            core: CoreProcess::new(core_kind),
             aggregate,
             lifecycle: Arc::new(Mutex::new(())),
             epoch: 0,
@@ -147,6 +152,7 @@ impl Store {
             scan_offset: 0,
             search_round: 0,
             last_openai_probe: 0,
+            last_openai_failover: 0,
             traffic_stop: None,
             dirty_traffic: false,
             egui_ctx: None,

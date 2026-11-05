@@ -81,6 +81,8 @@ fn dispatch(action: ui::Action, shared: &state::Shared, ctx: &egui::Context) {
         SelectVerified(node) => actions::select_verified(shared, ctx, node),
         CancelLatency => actions::cancel_latency(shared),
         InspectNow => actions::inspect_now(shared, ctx),
+        UpdateRules => actions::update_rules(shared, ctx),
+        Kernel(kind) => actions::change_kernel(shared, ctx, kind),
         AddSource(name, url) => {
             if let Err(error) = actions::add_source(shared, &name, &url) {
                 let mut store = shared.lock().unwrap();

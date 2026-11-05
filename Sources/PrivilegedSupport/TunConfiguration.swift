@@ -4,7 +4,17 @@ import ProxyLogic
 public enum TunConfiguration {
     // Only the app's generated configuration is accepted by the root service.
     // Executable paths, controller addresses and filesystem destinations are never supplied over XPC.
-    public static func validate(_ data: Data) throws {
+    public static func validate(_ data: Data) throws { try validate(data, kernel: .mihomo) }
+
+    public static func validate(_ data: Data, kernel: KernelKind) throws {
+        switch kernel {
+        case .mihomo: try validateMihomo(data)
+        case .singBox: try validateSingbox(data)
+        case .xray: throw ProxyError.message("Xray 内核不支持 TUN")
+        }
+    }
+
+    private static func validateMihomo(_ data: Data) throws {
         guard data.count <= 10_000_000,
               let config = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw invalid() }
         let keys: Set<String> = ["mixed-port", "allow-lan", "bind-address", "mode", "log-level", "ipv6",
@@ -42,6 +52,64 @@ public enum TunConfiguration {
             if let value = config[key] { try rejectFileReferences(value) }
         }
     }
+    private static func validateSingbox(_ data: Data) throws {
+        guard data.count <= 10_000_000,
+              let config = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw invalid() }
+        let keys: Set<String> = ["log", "inbounds", "outbounds", "route", "dns", "experimental"]
+        guard Set(config.keys).isSubset(of: keys),
+              let inbounds = config["inbounds"] as? [[String: Any]], !inbounds.isEmpty,
+              let outbounds = config["outbounds"] as? [[String: Any]], outbounds.count <= 5002,
+              let route = config["route"] as? [String: Any],
+              let rules = route["rules"] as? [[String: Any]], rules.count <= 64,
+              ["SMART", "direct"].contains(route["final"] as? String ?? ""),
+              let dns = config["dns"] as? [String: Any],
+              let servers = dns["servers"] as? [[String: Any]], !servers.isEmpty,
+              let experimental = config["experimental"] as? [String: Any],
+              let clash = experimental["clash_api"] as? [String: Any],
+              clash["external_controller"] as? String == "127.0.0.1:\(Configuration.controllerPort)",
+              let secret = clash["secret"] as? String, secret.utf8.count >= 16 else { throw invalid() }
+        var mixed = false, probe = false, tun = false
+        for inbound in inbounds {
+            switch inbound["type"] as? String {
+            case "mixed":
+                guard inbound["listen"] as? String == "127.0.0.1",
+                      inbound["listen_port"] as? Int == Configuration.proxyPort else { throw invalid() }
+                mixed = true
+            case "http":
+                guard inbound["listen"] as? String == "127.0.0.1",
+                      inbound["listen_port"] as? Int == Configuration.probePort else { throw invalid() }
+                probe = true
+            case "tun":
+                guard inbound["auto_route"] as? Bool == true,
+                      let address = inbound["address"] as? [String], address == ["172.19.0.1/30"] else { throw invalid() }
+                tun = true
+            default:
+                throw invalid()
+            }
+            try rejectSingboxReferences(inbound)
+        }
+        guard mixed, probe, tun else { throw invalid() }
+        let allowed: Set<String> = ["shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2",
+                                    "tuic", "anytls", "http", "socks", "direct", "block", "selector"]
+        for outbound in outbounds {
+            guard let type = outbound["type"] as? String, allowed.contains(type) else { throw invalid() }
+            try rejectSingboxReferences(outbound)
+        }
+    }
+
+    private static func rejectSingboxReferences(_ value: Any, transport: Bool = false) throws {
+        if let dict = value as? [String: Any] {
+            for (key, child) in dict {
+                let lower = key.lowercased()
+                guard !(lower.contains("path") && !(lower == "path" && transport)),
+                      !["certificate", "private_key", "private-key", "script", "plugin", "provider", "cache_file"].contains(lower) else { throw invalid() }
+                try rejectSingboxReferences(child, transport: transport || lower == "transport")
+            }
+        } else if let items = value as? [Any] {
+            for item in items { try rejectSingboxReferences(item, transport: transport) }
+        }
+    }
+
     private static func validateProxy(_ proxy: [String: Any]) throws {
         var checked = proxy
         if proxy["type"] as? String == "ss", proxy["plugin"] as? String == "obfs",

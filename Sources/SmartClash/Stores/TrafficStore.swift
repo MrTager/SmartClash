@@ -56,6 +56,33 @@ final class TrafficStore: ObservableObject {
             }
         }
     }
+    /// Xray 没有流式流量接口，按秒读取入站累计值并换算速率。
+    func startPolling(executable: URL, runID: String) {
+        task?.cancel(); sessionUpload = 0; sessionDownload = 0; points = []
+        connected = false; expectingData = true; usingFallback = true; updatedAt = nil
+        uploadRate = 0; downloadRate = 0; lastStreamSample = nil; previousSnapshot = nil
+        let token = UUID(); generation = token
+        task = Task { [weak self] in
+            var previous: (up: UInt64, down: UInt64, at: Date)?
+            while !Task.isCancelled {
+                guard let self, self.generation == token else { return }
+                if let totals = await XrayStats.totals(executable: executable) {
+                    let now = Date()
+                    let seconds = previous.map { max(now.timeIntervalSince($0.at), 0.001) } ?? 1
+                    let up = previous.map { totals.up >= $0.up ? totals.up - $0.up : 0 } ?? totals.up
+                    let down = previous.map { totals.down >= $0.down ? totals.down - $0.down : 0 } ?? totals.down
+                    previous = (totals.up, totals.down, now)
+                    ingest(TrafficSample(up: UInt64(Double(up) / seconds),
+                                         down: UInt64(Double(down) / seconds),
+                                         upTotal: totals.up, downTotal: totals.down),
+                           runID: runID, at: now)
+                } else {
+                    markUnavailable()
+                }
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            }
+        }
+    }
     func stop() {
         generation = UUID(); task?.cancel(); task = nil; save()
         connected = false; expectingData = false; uploadRate = 0; downloadRate = 0

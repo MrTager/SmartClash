@@ -45,8 +45,21 @@ pub fn resource(name: &str) -> PathBuf {
     beside
 }
 
-pub fn core_binary() -> PathBuf {
-    resource("mihomo.exe")
+pub fn core_binary(kind: crate::logic::kernel::KernelKind) -> PathBuf {
+    resource(kind.binary_name())
+}
+
+/// Xray 的 geoip.dat / geosite.dat 所在目录（打包后与内核同目录）。
+pub fn asset_dir() -> PathBuf {
+    let beside = app_dir().join("resources");
+    if beside.exists() {
+        return beside;
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    if dev.exists() {
+        return dev;
+    }
+    beside
 }
 
 pub fn curl_binary() -> PathBuf {

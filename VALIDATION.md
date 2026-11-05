@@ -140,3 +140,28 @@ Mac 上额外验收：
 - 构建与安装：`bash script/build.sh` 产出 `dist/SmartClash.app`（0.7.1 / build 11，ad-hoc 签名 + hardened runtime，完整签名校验通过）；旧应用备份为 `dist/SmartClash-installed-backup-20261105-133147.app` 后替换 `/Applications/SmartClash.app`，应用、helper、Mihomo 的 SHA-256 与构建产物一致，新进程从 `/Applications` 启动。
 - 替换前旧应用的正常退出被挂起的特权 XPC 调用阻塞，故按 `proxy-backup.json` 的 15 条快照用 `networksetup` 精确还原 5 个网络服务的原始代理设置（均为 off / 127.0.0.1:12450），停止遗留内核，清理陈旧的 `core.pid` 与代理备份；替换后系统代理全关、无遗留恢复记录、无 `com.smartclash.core` 服务。清理前的状态文件副本保存在 `dist/` 下。
 - 仍待实机验收：ad-hoc 重签使客户端 cdhash 由 `68c2b91c…` 变为 `fe688109…`，与已安装 helper 的 `clientRequirement` 不匹配，首次开启系统代理 / TUN 需在管理员窗口重新授权一次以重装后台服务；之后才能验证 TUN 接管、DNS 劫持、联网与关闭后的路由恢复。故障期间内核日志显示选中节点 `Japan日本2 · bd36b8b75548` 及多条链式节点持续 `dns resolve failed`，建议先在系统代理模式确认出口节点可用再开启 TUN。
+
+## 2026-11-05 · Windows AI 线路选择修复
+
+- 现象：AI 模式下每次自动选路都落在香港出口，而香港通常被 OpenAI 地区限制；后台虽然显示 OpenAI 探测失败，但不会切走。
+- 根因：默认线路模式是“低延迟链路”，排序只比较 HTTPS 延迟；AI 模式连接时只读取历史缓存，从不预先验证 OpenAI 可达性；Windows 版监控把 OpenAI 结果仅当质量提示，不参与线路存活判定。
+- 修改（`windows/src/state/actions.rs`）：
+  - AI 模式连接前按延迟顺序预检最多 8 个候选（最多 25 秒），返回第一个 OpenAI 可达的节点；60 秒内刚确认被地区限制的节点直接跳过。全部未通过时先连普通线路，并继续后台复检。
+  - AI 模式下监控每 10 秒复检 OpenAI；明确 `blocked` / `offline` 时立即进入 AI 线路切换，30 秒内最多一次，避免来回抖动。`limited` / `unknown` 仍保留当前线路。
+  - 修正 AI 切换记录当前节点结果时误用节点名称作为 `measurements` 键的问题，改为节点 id。
+- 修改（`windows/src/logic/health.rs`）：地区限制判定新增 `country, region, or territory not supported`、`not available in your country`、`not supported in your region`，避免只返回 403 文案时被判成 `unknown`。
+- 自动化检查：`cargo check` 通过；`cargo test` 14 项通过、0 失败，其中新增 4 项覆盖地区限制文案、429 限流与无 Key 认证响应。
+- 仍待实机验收：使用至少一个香港入口和一个美国入口，在 AI 模式点击“连接”或“按此模式重新选路”，确认香港被跳过且业务出口为 OpenAI 可达节点；确认预检期间 SMART 出口不变；人为断开当前 AI 线路后确认 30 秒内切换；确认 429 与 `unknown` 不触发切换；全部候选被限制时应回退普通线路而不是反复重连。
+
+## 2026-11-05 · Windows 功能缺陷修复
+
+- 修复全量配置重载：不再把整份 JSON 塞进 curl 参数（Windows 命令行约 32K 上限），改为写临时文件后按路径重载；失败节点选择与智能切换不再必然失败。
+- 修复控制接口静默失败：`api` 统一校验 4xx/5xx，节点选择、模式切换、断开连接和配置重载不再把 404 当成功。
+- 修复 TUN 验证：先检查 Wintun / Mihomo 网卡与 `0.0.0.0/1`、`128.0.0.0/1` 路由，再验证出网；仅本地 7890 可用不再被当成 TUN 已接管。
+- 修复空闲连接快照：`/connections` 返回 `"connections": null` 时折叠为空列表，地球与连接列表不再每秒报错清空。
+- 修复订阅刷新状态：更新后过滤已删除的计划节点并同步 `selected` / `route_plan`；直连切回规则或全局时自动重新选路，不再静默卡住。
+- 修复监控行为：尊重用户设置的检测间隔（不再固定 1 秒或截断 5 分钟选项），移除后台自动开启系统代理，不再覆盖用户关闭的“自动切换节点”偏好。
+- 修复展示与健壮性：订阅页显示实际端口 7892、累计流量使用可读单位、单节点不支持时只跳过该节点并给出警告、系统代理部分恢复失败时保留备份。
+- 修复进程归属与提权：终止前校验 pid 对应的可执行文件路径；移除长期免 UAC 的计划任务，启动 / 停止 TUN 均经用户确认，并在提权脚本中清理旧任务。
+- 自动化检查：`cargo test` 16 项通过、0 失败；新增空闲连接快照与混合订阅跳过节点两项回归测试。
+- 仍待实机验收：TUN 真机接管（当前环境无管理员权限）、长订阅下自动切换、直连切回代理后的重新选路，以及每次 TUN 开关的 UAC 提示。

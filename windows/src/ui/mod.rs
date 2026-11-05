@@ -38,9 +38,6 @@ pub struct ViewState {
     pub source_url: String,
     pub node_query: String,
     pub node_sort: NodeSortOrder,
-    pub chain_entry_ids: std::collections::BTreeSet<String>,
-    pub chain_exit_ids: std::collections::BTreeSet<String>,
-    pub show_chain_editor: bool,
     pub globe_yaw: f32,
     pub globe_pitch: f32,
     pub globe_distance: f32,
@@ -59,9 +56,6 @@ impl Default for ViewState {
             source_url: String::new(),
             node_query: String::new(),
             node_sort: NodeSortOrder::Latency,
-            chain_entry_ids: Default::default(),
-            chain_exit_ids: Default::default(),
-            show_chain_editor: false,
             globe_yaw: DEFAULT_GLOBE_LON,
             globe_pitch: DEFAULT_GLOBE_LAT,
             globe_distance: 3.9,
@@ -92,6 +86,8 @@ pub enum Action {
     SelectVerified(ProxyNode),
     CancelLatency,
     InspectNow,
+    UpdateRules,
+    Kernel(crate::logic::kernel::KernelKind),
     AddSource(String, String),
     RemoveSource(String),
     Export,
@@ -129,12 +125,6 @@ pub fn draw(
                     });
                 ui.label(egui::RichText::new("SmartClash").size(19.0).strong());
             });
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Windows · Rust")
-                    .size(11.0)
-                    .color(widgets::MUTED),
-            );
             ui.add_space(18.0);
 
             for section in Section::ALL {
@@ -169,8 +159,6 @@ pub fn draw(
                             );
                         });
                     });
-                ui.add_space(8.0);
-                widgets::hint(ui, "本地处理 · 私有订阅");
             });
         });
 

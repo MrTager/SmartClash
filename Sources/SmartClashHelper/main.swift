@@ -24,23 +24,45 @@ final class HelperService: NSObject, PrivilegedXPC, NSXPCListenerDelegate {
             }
         }
     }
-    func startTun(_ configuration: Data, withReply reply: @escaping (String?) -> Void) {
+    func startTun(_ configuration: Data, kernel: String, withReply reply: @escaping (String?) -> Void) {
         execute(reply) {
-            try TunConfiguration.validate(configuration)
+            let kind: KernelKind
+            switch kernel.lowercased() {
+            case "mihomo", "clash": kind = .mihomo
+            case "singbox", "sing-box": kind = .singBox
+            default: throw ProxyError.message("后台服务不支持该内核的 TUN 模式")
+            }
+            try TunConfiguration.validate(configuration, kernel: kind)
             guard !FileManager.default.fileExists(atPath: HelperLocation.corePlist) else {
                 throw ProxyError.message("发现遗留 TUN 服务，请先恢复网络")
             }
             let root = HelperLocation.coreDirectory
             try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let core = root + "/mihomo"
-            try self.run("/usr/bin/install", ["-o", "root", "-g", "wheel", "-m", "755", HelperLocation.directory + "/mihomo", core])
+            let name = kind.binaryName
+            let source = HelperLocation.directory + "/" + name
+            guard FileManager.default.fileExists(atPath: source) else {
+                throw ProxyError.message("后台服务缺少 \(kind.title) 内核，请重新安装应用")
+            }
+            let core = root + "/" + name
+            try self.run("/usr/bin/install", ["-o", "root", "-g", "wheel", "-m", "755", source, core])
             let config = root + "/config.json"
             try self.write(configuration, to: config)
-            try self.run(core, ["-t", "-d", root, "-f", config])
+            let arguments: [String]
+            switch kind {
+            case .mihomo:
+                try self.run(core, ["-t", "-d", root, "-f", config])
+                arguments = [core, "-d", root, "-f", config]
+            case .singBox:
+                try self.run(core, ["check", "-c", config, "-D", root])
+                arguments = [core, "run", "-c", config, "-D", root]
+            case .xray:
+                throw ProxyError.message("Xray 内核不支持 TUN")
+            }
             let plist: [String: Any] = ["Label": HelperLocation.coreLabel,
-                "ProgramArguments": [core, "-d", root, "-f", config], "RunAtLoad": true, "KeepAlive": false,
+                "ProgramArguments": arguments, "RunAtLoad": true, "KeepAlive": false,
                 "StandardOutPath": root + "/core.log", "StandardErrorPath": root + "/core.log",
-                "WorkingDirectory": root, "Umask": 0o077]
+                "WorkingDirectory": root, "Umask": 0o077,
+                "EnvironmentVariables": ["XRAY_LOCATION_ASSET": HelperLocation.directory]]
             try self.write(PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0), to: HelperLocation.corePlist)
             // Leave the recovery record if bootstrap fails so the GUI can perform a fixed-label cleanup.
             try self.run("/bin/launchctl", ["bootstrap", "system", HelperLocation.corePlist])

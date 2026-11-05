@@ -1,28 +1,107 @@
 use crate::logic::configuration;
 use crate::logic::dynamic_router::{DynamicRouter, RoutePlan};
 use crate::logic::health::{now_ms, HealthPolicy};
+use crate::logic::kernel::{KernelKind, RulesSupport};
 use crate::logic::model::{
-    NodeLatency, ProbeResult, ProxyNode, RoutingMode, TrafficMode, PROBE_PORT, PROXY_PORT,
+    LinkMeasurements, NodeLatency, ProbeResult, ProxyNode, RoutingMode, TrafficMode, PROBE_PORT,
+    PROXY_PORT,
 };
 use crate::logic::ranking::{ModeRanking, NodeRanking};
 use crate::services::core_client::CoreClient;
+use crate::services::core_process;
+use crate::services::core_probe;
 use crate::services::network;
 use crate::services::paths;
 use crate::services::subscription_service;
 use crate::services::system_proxy::SystemProxy;
 use crate::state::activity;
 use crate::state::traffic;
+use crate::state::tun_transition::{self, TunRuntime};
 use crate::state::{with_store, Shared};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
+
+/// 当前内核类型。
+fn kernel_of(shared: &Shared) -> KernelKind {
+    with_store(shared, |store| store.preferences.kernel)
+}
+
+/// 构建指向当前内核控制接口的客户端。
+fn client_of(shared: &Shared) -> CoreClient {
+    let (kind, secret) = with_store(shared, |store| {
+        (store.preferences.kernel, store.preferences.secret.clone())
+    });
+    CoreClient::new(kind, &secret)
+}
+
+/// 过滤出当前内核支持的节点，保持原顺序并去重。
+fn first_supported_name(kind: KernelKind, nodes: &[ProxyNode], preferred: Option<&str>) -> String {
+    if let Some(name) = preferred {
+        if nodes.iter().any(|node| node.name == name && kind.supports_node(node)) {
+            return name.to_string();
+        }
+    }
+    nodes
+        .iter()
+        .find(|node| kind.supports_node(node))
+        .map(|node| node.name.clone())
+        .unwrap_or_default()
+}
+
+/// 重启常驻内核，并恢复重启前的动态路由、TUN 与系统代理状态。
+fn restart_core(
+    shared: &Shared,
+    preferred: Option<String>,
+    resume_system_proxy: bool,
+) -> Result<(), String> {
+    let (running, tun, dynamic, plan, selected, system_proxy, epoch) = with_store(shared, |store| {
+        (
+            store.running,
+            store.tun,
+            store.dynamic_mode,
+            store.route_plan.clone(),
+            store.selected.clone(),
+            store.system_proxy,
+            store.epoch,
+        )
+    });
+    if !running {
+        return Ok(());
+    }
+    do_stop(shared)?;
+    with_store(shared, |store| {
+        store.dynamic_mode = dynamic;
+        store.route_plan = plan;
+    });
+    let preferred = preferred.or_else(|| {
+        if selected.is_empty() {
+            None
+        } else {
+            Some(selected)
+        }
+    });
+    do_start(shared, tun, preferred, Purpose::Connection)?;
+    if tun {
+        verify_tun(shared, epoch)?;
+    }
+    if resume_system_proxy && system_proxy {
+        enable_system_proxy(shared, epoch)?;
+    }
+    start_monitor(shared);
+    Ok(())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     Connection,
     LatencyTest,
 }
+
+/// AI 模式连接前的 OpenAI 预检上限：避免一键连接被地区限制节点拖死。
+const AI_VERIFY_LIMIT: usize = 8;
+const AI_VERIFY_BUDGET_MS: u64 = 25_000;
 
 fn fail(shared: &Shared, message: impl Into<String>) {
     let message = message.into();
@@ -76,11 +155,12 @@ pub fn refresh(shared: &Shared, ctx: &egui::Context) {
 }
 
 fn do_refresh(shared: &Shared) -> Result<(), String> {
-    let (sources, running, secret) = with_store(shared, |store| {
+    let (sources, running, secret, kind) = with_store(shared, |store| {
         (
             store.preferences.sources.clone(),
             store.running,
             store.preferences.secret.clone(),
+            store.preferences.kernel,
         )
     });
     if with_store(shared, |s| s.is_testing_latency) {
@@ -95,62 +175,79 @@ fn do_refresh(shared: &Shared) -> Result<(), String> {
 
     let update = subscription_service::update(&sources, running)?;
 
+    let mut refreshed: Option<(Vec<ProxyNode>, Vec<ProxyNode>, String)> = None;
+    let mut restart_preferred: Option<String> = None;
     if running {
         let (plan, selected, traffic_mode) = with_store(shared, |s| {
             (s.route_plan.clone(), s.selected.clone(), s.preferences.traffic_mode)
         });
-        let routes = if plan.candidates.is_empty() {
-            None
-        } else {
-            Some(plan.candidates.as_slice())
-        };
-        let data = configuration::make(
-            &update.nodes,
-            &secret,
-            false,
-            routes,
-            &plan.definitions,
-            None,
-            Some(&selected),
-            traffic_mode,
-        )?;
-        let temp = paths::data_root().join("reload.json");
-        paths::write_private(&temp, &data)?;
-        let exe = paths::core_binary();
-        let test = crate::services::command::run(
-            &exe,
-            &[
-                "-t".into(),
-                "-d".into(),
-                paths::data_root().display().to_string(),
-                "-f".into(),
-                temp.display().to_string(),
-            ],
-        )
-        .map_err(|e| format!("无法校验更新配置：{e}"))?;
-        if test.code != 0 {
-            return Err("更新配置未通过内核校验，继续使用旧配置".into());
-        }
-        let client = CoreClient::new(&secret);
-        client.reload_config_path(&temp.display().to_string())?;
+        // 订阅更新后旧计划里的节点可能已被删除；必须过滤，否则生成的
+        // SMART 组会引用不存在的代理，内核校验直接失败。
         let available: Vec<ProxyNode> = if plan.candidates.is_empty() {
             update.nodes.clone()
         } else {
-            plan.candidates.clone()
+            let kept: Vec<ProxyNode> = plan
+                .candidates
+                .iter()
+                .filter(|old| update.nodes.iter().any(|new| new.id == old.id))
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                update.nodes.clone()
+            } else {
+                kept
+            }
         };
-        let next = available
-            .iter()
-            .find(|n| n.name == selected)
-            .or_else(|| available.first())
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
-        if !next.is_empty() {
-            let _ = client.select(&next, "SMART");
+        let next = if traffic_mode.uses_proxy() {
+            available
+                .iter()
+                .find(|n| n.name == selected)
+                .or_else(|| available.first())
+                .map(|n| n.name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if kind == KernelKind::Mihomo {
+            let built = configuration::make_for(
+                kind,
+                &update.nodes,
+                &secret,
+                false,
+                Some(&available),
+                &plan.definitions,
+                None,
+                Some(&selected),
+                traffic_mode,
+            )?;
+            for warning in &built.warnings {
+                log(shared, warning);
+            }
+            let temp = paths::data_root().join("reload.json");
+            paths::write_private(&temp, &built.data)?;
+            core_process::validate(kind, &built.data)?;
+            let client = CoreClient::new(kind, &secret);
+            client.reload_config_path(&temp.display().to_string())?;
+            if !next.is_empty() {
+                client.select(&next, "SMART")?;
+            }
+        } else {
+            // sing-box / Xray 不支持可靠的热加载；更新订阅后整体重启内核。
+            restart_preferred = Some(next.clone());
         }
+        refreshed = Some((available, plan.definitions, next));
     }
 
     with_store(shared, |store| {
         store.nodes = update.nodes.clone();
+        if let Some((candidates, definitions, selected)) = refreshed {
+            store.route_plan = RoutePlan {
+                candidates,
+                definitions,
+            };
+            store.selected = selected;
+            store.publish_route();
+        }
         let _ = store.aggregate.update(&store.nodes.clone());
         store.last_update = now_ms();
         store.log(&format!("订阅已合并：{} 个去重节点", store.nodes.len()));
@@ -158,6 +255,14 @@ fn do_refresh(shared: &Shared) -> Result<(), String> {
             store.log(warning);
         }
     });
+    if let Some(preferred) = restart_preferred {
+        let preferred = if preferred.is_empty() {
+            None
+        } else {
+            Some(preferred)
+        };
+        restart_core(shared, preferred, true)?;
+    }
     Ok(())
 }
 
@@ -224,6 +329,56 @@ pub fn export_yaml(shared: &Shared) {
     });
 }
 
+// ---------------------------------------------------------------- 规则
+
+pub fn update_rules(shared: &Shared, ctx: &egui::Context) {
+    perform(shared, ctx, |store, _ctx| {
+        if let Err(error) = do_update_rules(store) {
+            with_store(store, |state| {
+                state.rule_status = "规则更新失败，已保留旧规则，稍后自动重试".into();
+            });
+            fail(store, error);
+        }
+    });
+}
+
+fn do_update_rules(shared: &Shared) -> Result<(), String> {
+    let (running, secret, kind) = with_store(shared, |store| {
+        (
+            store.running,
+            store.preferences.secret.clone(),
+            store.preferences.kernel,
+        )
+    });
+    if !running {
+        return Err("请先启动内核，再更新规则".into());
+    }
+    with_store(shared, |store| {
+        store.rule_status = "正在更新规则…".into();
+    });
+    match kind.capabilities().rules {
+        RulesSupport::Provider => {
+            CoreClient::new(kind, &secret).update_rule_providers()?;
+        }
+        RulesSupport::Restart => {
+            // sing-box 的规则集由内核自行下载；重启后立即检查一次更新。
+            restart_core(shared, None, true)?;
+        }
+        RulesSupport::Builtin => {
+            with_store(shared, |store| {
+                store.rule_status = "Xray 使用内置 geo 数据，不支持在线更新".into();
+            });
+            return Err("Xray 使用内置 geo 数据（geosite/geoip），无法在线更新规则".into());
+        }
+    }
+    let updated_at = paths::time_text();
+    log(shared, &format!("规则已更新 · {updated_at}"));
+    with_store(shared, |store| {
+        store.rule_status = format!("规则已更新 · {updated_at}");
+    });
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 启动 / 停止
 
 pub fn start_only(shared: &Shared, ctx: &egui::Context) {
@@ -273,15 +428,22 @@ fn do_start(
     if with_store(shared, |s| s.recovery) {
         return Err("请先恢复上次网络设置".into());
     }
-    let (nodes, secret, plan, latencies, traffic_mode) = with_store(shared, |store| {
+    let (nodes, secret, plan, latencies, traffic_mode, kind) = with_store(shared, |store| {
         (
             store.nodes.clone(),
             store.preferences.secret.clone(),
             store.route_plan.clone(),
             store.latencies.clone(),
             store.preferences.traffic_mode,
+            store.preferences.kernel,
         )
     });
+    if tun && !kind.capabilities().tun {
+        return Err(format!(
+            "{} 内核不支持 TUN，请关闭 TUN 或改用 Mihomo / sing-box",
+            kind.title()
+        ));
+    }
     if nodes.is_empty() && traffic_mode.uses_proxy() {
         return Err("请先添加并更新订阅".into());
     }
@@ -307,7 +469,8 @@ fn do_start(
     } else {
         Some(plan.candidates.as_slice())
     };
-    let data = configuration::make(
+    let data = configuration::make_for(
+        kind,
         &nodes,
         &secret,
         tun,
@@ -317,9 +480,14 @@ fn do_start(
         preferred_name.as_deref(),
         traffic_mode,
     )?;
+    for warning in &data.warnings {
+        log(shared, warning);
+    }
+    let data = data.data;
 
     let mut core = with_store(shared, |store| std::mem::take(&mut store.core));
-    let client = CoreClient::new(&secret);
+    core.set_kind(kind);
+    let client = CoreClient::new(kind, &secret);
     let result = core.start(&data, tun, &client);
     let recovery = core.recovery_needed() || SystemProxy::has_backup();
     if with_store(shared, |s| s.epoch != epoch) {
@@ -336,12 +504,7 @@ fn do_start(
     match result {
         Ok(()) => {
             let selected = if traffic_mode.uses_proxy() {
-                route_nodes
-                    .iter()
-                    .find(|n| Some(&n.name) == preferred_name.as_ref())
-                    .or_else(|| route_nodes.first())
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default()
+                first_supported_name(kind, &route_nodes, preferred_name.as_deref())
             } else {
                 String::new()
             };
@@ -359,6 +522,8 @@ fn do_start(
                 }
                 store.failures = 0;
                 store.last_switch = 0;
+                store.last_openai_probe = 0;
+                store.last_openai_failover = 0;
                 store.publish_route();
                 store.log(match purpose {
                     Purpose::LatencyTest => "仅测速内核已启动，未接管系统网络",
@@ -366,6 +531,7 @@ fn do_start(
                     Purpose::Connection if tun => "TUN 已启动",
                     Purpose::Connection => "代理内核已启动",
                 });
+                store.log(&format!("当前内核：{}", kind.title()));
             });
             start_traffic(shared);
             start_activity(shared);
@@ -455,8 +621,10 @@ fn do_toggle_system(shared: &Shared) -> Result<(), String> {
         SystemProxy::restore()?;
         with_store(shared, |store| {
             store.system_proxy = false;
-            store.dynamic_mode = false;
-            store.routing_status = "系统代理已关闭，内核继续运行".into();
+            if !store.tun {
+                store.dynamic_mode = false;
+                store.routing_status = "系统代理已关闭，内核继续运行".into();
+            }
             store.log("系统代理已关闭");
         });
         return Ok(());
@@ -473,11 +641,11 @@ fn do_toggle_system(shared: &Shared) -> Result<(), String> {
         }
         return Err("操作已停止".into());
     }
-    let result = do_ensure_route(shared, true, Some(epoch)).and_then(|_| SystemProxy::enable());
+    let result = do_ensure_route(shared, true, Some(epoch))
+        .and_then(|_| enable_system_proxy(shared, epoch));
     match result {
         Ok(()) => {
             with_store(shared, |store| {
-                store.system_proxy = true;
                 store.log("系统 HTTP / HTTPS 代理已开启");
             });
             start_monitor(shared);
@@ -495,6 +663,24 @@ fn do_toggle_system(shared: &Shared) -> Result<(), String> {
     }
 }
 
+fn enable_system_proxy(shared: &Shared, epoch: u64) -> Result<(), String> {
+    // Serialize the registry change with stop/start so a cancelled operation
+    // cannot leave the system proxy pointing at an endpoint that was removed.
+    let lifecycle = with_store(shared, |store| Arc::clone(&store.lifecycle));
+    let _guard = lifecycle.lock().unwrap();
+    if cancelled(shared, epoch) {
+        return Err("操作已停止".into());
+    }
+    let result = SystemProxy::enable();
+    with_store(shared, |store| {
+        store.system_proxy = SystemProxy::has_backup();
+        if result.is_err() && store.system_proxy {
+            store.recovery = true;
+        }
+    });
+    result
+}
+
 pub fn toggle_tun(shared: &Shared, ctx: &egui::Context) {
     perform(shared, ctx, |store, _ctx| {
         if let Err(error) = do_toggle_tun(store) {
@@ -504,25 +690,29 @@ pub fn toggle_tun(shared: &Shared, ctx: &egui::Context) {
 }
 
 fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
+    let kind = kernel_of(shared);
+    if !kind.capabilities().tun {
+        return Err(format!(
+            "{} 内核不支持 TUN，请改用 Mihomo 或 sing-box",
+            kind.title()
+        ));
+    }
     let epoch = with_store(shared, |s| s.epoch);
-    let (tun, dynamic, previous, plan) = with_store(shared, |store| {
+    let (tun, system_proxy, dynamic, previous, plan) = with_store(shared, |store| {
         (
             store.tun,
+            store.system_proxy,
             store.dynamic_mode,
             store.selected.clone(),
             store.route_plan.clone(),
         )
     });
     if tun {
-        do_stop(shared)?;
-        if cancelled(shared, epoch) {
-            return Err("操作已停止".into());
-        }
-        with_store(shared, |store| {
-            store.dynamic_mode = dynamic;
-            store.route_plan = plan;
-        });
-        return do_start(shared, false, Some(previous), Purpose::Connection);
+        return tun_transition::restart(
+            &mut TunRestart { shared, epoch, dynamic, selected: previous, plan },
+            false,
+            system_proxy,
+        );
     }
 
     // 先在非特权状态验证单跳出口，再让内核接管系统流量。
@@ -534,27 +724,87 @@ fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
         return Err("操作已停止".into());
     }
     let (verified, plan) = with_store(shared, |store| (store.selected.clone(), store.route_plan.clone()));
-    do_stop(shared)?;
-    if cancelled(shared, epoch) {
-        return Err("操作已停止".into());
-    }
-    with_store(shared, |store| {
-        store.dynamic_mode = dynamic;
-        store.route_plan = plan;
-    });
-    do_start(shared, true, Some(verified), Purpose::Connection)?;
+    tun_transition::restart(
+        &mut TunRestart { shared, epoch, dynamic, selected: verified, plan },
+        true,
+        system_proxy,
+    )
+}
 
-    let secret = with_store(shared, |s| s.preferences.secret.clone());
-    let client = CoreClient::new(&secret);
+struct TunRestart<'a> {
+    shared: &'a Shared,
+    epoch: u64,
+    dynamic: bool,
+    selected: String,
+    plan: RoutePlan,
+}
+
+impl TunRuntime for TunRestart<'_> {
+    fn stop(&mut self) -> Result<(), String> {
+        do_stop(self.shared)
+    }
+
+    fn start(&mut self, tun: bool) -> Result<(), String> {
+        if cancelled(self.shared, self.epoch) {
+            return Err("操作已停止".into());
+        }
+        with_store(self.shared, |store| {
+            store.dynamic_mode = self.dynamic;
+            store.route_plan = self.plan.clone();
+        });
+        do_start(self.shared, tun, Some(self.selected.clone()), Purpose::Connection)
+    }
+
+    fn verify_tun(&mut self) -> Result<(), String> {
+        verify_tun(self.shared, self.epoch)
+    }
+
+    fn enable_system_proxy(&mut self) -> Result<(), String> {
+        enable_system_proxy(self.shared, self.epoch)
+    }
+}
+
+fn verify_tun(shared: &Shared, epoch: u64) -> Result<(), String> {
+    let (secret, kind) = with_store(shared, |s| {
+        (s.preferences.secret.clone(), s.preferences.kernel)
+    });
+    let client = CoreClient::new(kind, &secret);
+    // 先确认 wintun 网卡与分流路由真的接管了系统流量；
+    // 只探测 7890 混合端口无法区分「TUN 生效」和「仅本地代理可用」。
+    let mut tun_detail = String::new();
+    for attempt in 1..=8u32 {
+        if cancelled(shared, epoch) {
+            return Err("操作已停止".into());
+        }
+        match network::tun_ready() {
+            Ok(detail) => {
+                tun_detail = detail;
+                break;
+            }
+            Err(_) => {
+                with_store(shared, |store| {
+                    store.internet_status =
+                        format!("TUN 内核已启动，等待网卡接管（{attempt}/8）");
+                });
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+    if tun_detail.is_empty() {
+        return Err(
+            "TUN 内核已启动，但未检测到已接管流量的 TUN 网卡/路由；请检查 wintun、管理员权限或其他 VPN 冲突"
+                .into(),
+        );
+    }
+
     // TUN 接管后路由/接口就绪与出口建连需要时间，且出口线路可能抖动，
-    // 给约 40 秒重试窗口，避免刚接管就误判失败。
+    // 给约 10 秒重试窗口，避免刚接管就误判失败。
     let mut result = client.internet_probe(PROXY_PORT);
     for attempt in 1..=5u32 {
         if result.health == crate::logic::model::Health::Healthy {
             break;
         }
         if cancelled(shared, epoch) {
-            let _ = do_stop(shared);
             return Err("操作已停止".into());
         }
         with_store(shared, |store| {
@@ -564,23 +814,14 @@ fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
         result = client.internet_probe(PROXY_PORT);
     }
     if result.health != crate::logic::model::Health::Healthy {
-        // 恢复网络失败必须如实上报：TUN 未真正停止时系统流量仍被劫持。
-        if let Err(stop_error) = do_stop(shared) {
-            with_store(shared, |store| {
-                store.recovery = true;
-                store.log(&format!("网络自动恢复未完成：{stop_error}"));
-            });
-            return Err(format!(
-                "TUN 接管后出网验证失败，且自动恢复未完成（{stop_error}）；请点击“恢复网络”并允许管理员授权"
-            ));
-        }
         return Err(
-            "TUN 接管后出网验证失败，已恢复网络；请检查出口节点状态、DNS、物理网卡或其他 VPN 冲突".into(),
+            "TUN 接管后出网验证失败；请检查出口节点状态、DNS、物理网卡或其他 VPN 冲突".into(),
         );
     }
     with_store(shared, |store| {
         store.internet_status = format!("TUN 出网已验证 · {} ms", result.milliseconds);
         store.routing_status = "已打通".into();
+        store.log(&format!("TUN 已接管：{tun_detail}"));
     });
     Ok(())
 }
@@ -613,7 +854,6 @@ fn do_connect(shared: &Shared) -> Result<(), String> {
     with_store(shared, |store| {
         store.search_round = 0;
         store.dynamic_mode = true;
-        store.preferences.automatic = true;
         store.route_plan = RoutePlan {
             candidates: nodes,
             definitions: Vec::new(),
@@ -665,13 +905,15 @@ pub fn change_traffic_mode(shared: &Shared, ctx: &egui::Context, mode: TrafficMo
 }
 
 fn do_change_traffic_mode(shared: &Shared, wanted: TrafficMode) -> Result<(), String> {
-    let (current, running, recovery, node_count, secret) = with_store(shared, |store| {
+    let epoch = with_store(shared, |s| s.epoch);
+    let (current, running, recovery, node_count, secret, kind) = with_store(shared, |store| {
         (
             store.preferences.traffic_mode,
             store.running,
             store.recovery,
             store.nodes.len(),
             store.preferences.secret.clone(),
+            store.preferences.kernel,
         )
     });
     if wanted == current {
@@ -683,7 +925,56 @@ fn do_change_traffic_mode(shared: &Shared, wanted: TrafficMode) -> Result<(), St
     if running && wanted.uses_proxy() && node_count == 0 {
         return Err("请先添加并更新订阅，才能使用规则或全局代理".into());
     }
-    let client = CoreClient::new(&secret);
+
+    // sing-box / Xray 的流量模式写在完整配置里，必须重启内核才能生效。
+    if running && kind != KernelKind::Mihomo {
+        with_store(shared, |store| {
+            store.preferences.traffic_mode = wanted;
+            store.save_preferences();
+        });
+        if let Err(error) = restart_core(shared, None, true) {
+            with_store(shared, |store| {
+                store.preferences.traffic_mode = current;
+                store.save_preferences();
+            });
+            let restored = restart_core(shared, None, true).is_ok();
+            with_store(shared, |store| {
+                if !restored {
+                    store.recovery = true;
+                    store.log("流量模式回滚未确认，请停止并恢复网络");
+                }
+            });
+            return Err(error);
+        }
+        with_store(shared, |store| {
+            match wanted {
+                TrafficMode::Direct => {
+                    store.selected.clear();
+                    store.active_mode = None;
+                    store.failures = 0;
+                    store.routing_status = "直连模式".into();
+                    store.internet_status = "直连模式已开启，等待验证".into();
+                    store.openai_status = "直连模式不检测代理节点".into();
+                }
+                _ => {
+                    store.failures = 0;
+                    store.routing_status = "流量模式已切换，等待验证".into();
+                    store.internet_status = "模式已切换，尚未验证出网".into();
+                    store.openai_status = "OpenAI 尚未检测".into();
+                }
+            }
+            store.publish_route();
+            store.log(&format!(
+                "流量模式：{}（已重启 {} 内核生效）",
+                wanted.title(),
+                kind.title()
+            ));
+        });
+        start_monitor(shared);
+        return Ok(());
+    }
+
+    let client = CoreClient::new(kind, &secret);
     if running {
         if let Err(error) = client.set_traffic_mode(wanted) {
             // 切换失败时尽力回到原模式，避免界面与内核状态不一致。
@@ -734,6 +1025,17 @@ fn do_change_traffic_mode(shared: &Shared, wanted: TrafficMode) -> Result<(), St
         if let Err(error) = client.close_connections() {
             log(shared, &format!("模式已切换，旧连接关闭未完成：{error}"));
         }
+        // 从直连切回代理时 selected 已被清空，必须重新选路；
+        // 若当前节点已从订阅中删除，同样需要重新选择。
+        let needs_route = with_store(shared, |store| {
+            let nodes = store.node_list_nodes();
+            !nodes.iter().any(|node| node.name == store.selected)
+        });
+        if wanted.uses_proxy() && needs_route {
+            if let Err(error) = do_ensure_route(shared, true, Some(epoch)) {
+                return Err(format!("流量模式已切换，但重新选路失败：{error}"));
+            }
+        }
         start_monitor(shared);
     }
     Ok(())
@@ -756,8 +1058,7 @@ fn do_ensure_route(
     }
     // 直连模式不选路：只要本地代理端口能直连出网，就可以继续开系统代理 / TUN。
     if !with_store(shared, |store| store.preferences.traffic_mode).uses_proxy() {
-        let secret = with_store(shared, |store| store.preferences.secret.clone());
-        let client = CoreClient::new(&secret);
+        let client = client_of(shared);
         let result = client.internet_probe(PROXY_PORT);
         if result.health != crate::logic::model::Health::Healthy {
             return Err("直连模式出网验证失败，请检查本机网络；未开启新的系统代理".into());
@@ -777,8 +1078,8 @@ fn do_ensure_route(
             store.preferences.secret.clone(),
         )
     });
-    let mut latencies;
-    let (nodes, measurements) = with_store(shared, |store| {
+    let mut latencies = with_store(shared, |store| store.latencies.clone());
+    let (nodes, mut measurements) = with_store(shared, |store| {
         (store.node_list_nodes(), store.measurements.clone())
     });
     with_store(shared, |store| {
@@ -824,10 +1125,12 @@ fn do_ensure_route(
         }
     }
 
-    let client = CoreClient::new(&secret);
+    let client = client_of(shared);
     let deadline = now_ms() + 45_000;
     let mut tested: HashSet<String> = HashSet::new();
     let mut speed_attempts = 0usize;
+    // AI 模式全都没有通过 OpenAI 预检时的兜底线路，最后再普通出网验证。
+    let mut ai_fallback: Option<ProxyNode> = None;
 
     for source in [quick, candidates] {
         let pending: Vec<ProxyNode> = source
@@ -865,8 +1168,8 @@ fn do_ensure_route(
                 crate::logic::model::NodeSortOrder::Latency,
             );
 
-            // AI 模式优先使用 OpenAI 已验证节点；一个都没验证过时仍按普通出网连接，
-            // 由后台监控继续确认 OpenAI 可达性，避免一键连接被单点验证拖死。
+            // AI 模式优先使用 OpenAI 已验证节点；没有缓存时先按延迟顺序做一次预检，
+            // 避免把香港等被地区限制的出口直接选成业务线路。
             if mode == RoutingMode::Ai {
                 reachable.sort_by_key(|node| {
                     !measurements
@@ -877,6 +1180,38 @@ fn do_ensure_route(
             }
 
             let mut eligible = reachable.clone();
+            if mode == RoutingMode::Ai {
+                let verify_deadline = deadline.min(now_ms() + AI_VERIFY_BUDGET_MS);
+                let verified = verify_ai_candidates(
+                    shared,
+                    &reachable,
+                    &measurements,
+                    verify_deadline,
+                    AI_VERIFY_LIMIT,
+                    &paused,
+                );
+                measurements = with_store(shared, |store| store.measurements.clone());
+                let Some(verified) = verified else {
+                    if ai_fallback.is_none() {
+                        ai_fallback = reachable.first().cloned();
+                    }
+                    // 本批没有通过 OpenAI 验证的候选，继续验证下一批；
+                    // 所有批次都失败后才回退到普通出网线路。
+                    continue;
+                };
+                // AI 模式只尝试 OpenAI 已验证的候选，避免预检节点业务出网失败后
+                // 又顺手连回同批未验证的香港出口。
+                let now = now_ms();
+                eligible = reachable
+                    .iter()
+                    .filter(|node| {
+                        node.id == verified.id
+                            || recently_verified(measurements.get(&node.id), now)
+                    })
+                    .cloned()
+                    .collect();
+                eligible.sort_by_key(|node| node.id != verified.id);
+            }
             if mode == RoutingMode::HighSpeed {
                 with_store(shared, |store| {
                     store.routing_status = "正在抽测下载吞吐（每轮约 1 MiB）".into();
@@ -886,9 +1221,9 @@ fn do_ensure_route(
                         break;
                     }
                     speed_attempts += 1;
-                    let sample = with_probe(shared, node, |_| {
-                        let client = CoreClient::new(&secret);
-                        client.throughput(PROBE_PORT)
+                    let sample = with_probe(shared, node, |port| {
+                        let client = CoreClient::new(kernel_of(shared), &secret);
+                        client.throughput(port)
                     })?;
                     with_store(shared, |store| {
                         let mut measured =
@@ -916,27 +1251,7 @@ fn do_ensure_route(
                 do_select(shared, &node)?;
                 let result = client.internet_probe(PROXY_PORT);
                 if result.health == crate::logic::model::Health::Healthy {
-                    with_store(shared, |store| {
-                        store.internet_status =
-                            format!("HTTPS 出网已验证 · {} ms", result.milliseconds);
-                        store.routing_status = "已打通".into();
-                        store.active_mode = Some(mode);
-                        store.set_status(&node.id, result.clone());
-                        if mode == RoutingMode::Ai {
-                            let confirmed = store
-                                .measurements
-                                .get(&node.id)
-                                .and_then(|m| m.openai_reachable)
-                                .unwrap_or(false);
-                            store.openai_status = if confirmed {
-                                "OpenAI 已验证".into()
-                            } else {
-                                "OpenAI 未确认 · 已连接普通线路".into()
-                            };
-                        }
-                        store.save_latencies();
-                        store.save_measurements();
-                    });
+                    mark_connected(shared, &node, &result, mode);
                     return Ok(());
                 }
                 if let Some(previous) = previous {
@@ -959,6 +1274,29 @@ fn do_ensure_route(
         }
     }
 
+    // AI 模式所有候选都没通过 OpenAI 预检时，仍然允许先连上普通出网线路；
+    // 后台监控会继续复检并切换，避免用户完全无法上网。
+    if mode == RoutingMode::Ai {
+        if let Some(node) = ai_fallback {
+            if !paused(shared) && now_ms() < deadline {
+                do_select(shared, &node)?;
+                let result = client.internet_probe(PROXY_PORT);
+                if result.health == crate::logic::model::Health::Healthy {
+                    mark_connected(shared, &node, &result, mode);
+                    log(shared, "没有候选通过 OpenAI 预检，已连接普通线路并继续后台复检");
+                    return Ok(());
+                }
+                latencies.insert(
+                    node.id.clone(),
+                    NodeLatency::new(None, Some("业务出网未通过".into())),
+                );
+                with_store(shared, |store| {
+                    store.latencies = latencies.clone();
+                });
+            }
+        }
+    }
+
     with_store(shared, |store| {
         store.save_latencies();
         store.save_measurements();
@@ -969,6 +1307,91 @@ fn do_ensure_route(
         tested.len(),
         mode.title()
     ))
+}
+
+/// 记录一次成功的业务线路验证。调用方已经切换并完成 HTTPS 出网探测。
+fn mark_connected(shared: &Shared, node: &ProxyNode, result: &ProbeResult, mode: RoutingMode) {
+    with_store(shared, |store| {
+        store.internet_status = format!("HTTPS 出网已验证 · {} ms", result.milliseconds);
+        store.routing_status = "已打通".into();
+        store.active_mode = Some(mode);
+        store.set_status(&node.id, result.clone());
+        if mode == RoutingMode::Ai {
+            let confirmed = store
+                .measurements
+                .get(&node.id)
+                .and_then(|m| m.openai_reachable)
+                .unwrap_or(false);
+            store.openai_status = if confirmed {
+                "OpenAI 已验证".into()
+            } else {
+                "OpenAI 未确认 · 已连接普通线路".into()
+            };
+        }
+        store.save_latencies();
+        store.save_measurements();
+    });
+}
+
+/// AI 模式连接前，按延迟顺序最多复检 `limit` 个候选的 OpenAI 可达性。
+/// 60 秒内刚被确认地区限制的节点直接跳过，避免反复连接时重复撞同一批香港出口。
+/// 返回第一个通过验证的节点；全部失败时返回 None，由调用方决定是否回退普通线路。
+fn verify_ai_candidates(
+    shared: &Shared,
+    candidates: &[ProxyNode],
+    measurements: &HashMap<String, LinkMeasurements>,
+    deadline: u64,
+    limit: usize,
+    paused: &impl Fn(&Shared) -> bool,
+) -> Option<ProxyNode> {
+    let mut attempts = 0usize;
+    for node in candidates {
+        if attempts >= limit || now_ms() >= deadline || paused(shared) {
+            break;
+        }
+        if recently_blocked(measurements.get(&node.id), now_ms()) {
+            continue;
+        }
+        attempts += 1;
+        with_store(shared, |store| {
+            store.routing_status = format!(
+                "正在验证 OpenAI 可达性 · 第 {attempts} 个候选 · {}",
+                node.name
+            );
+        });
+        match do_check(shared, node, true) {
+            Ok(result) if result.health == crate::logic::model::Health::Healthy => {
+                return Some(node.clone())
+            }
+            Ok(result) => {
+                if result.health == crate::logic::model::Health::Blocked {
+                    log(shared, &format!("{} 被 OpenAI 地区限制，跳过", node.name));
+                }
+            }
+            Err(error) => log(shared, &format!("{} OpenAI 预检失败：{error}", node.name)),
+        }
+    }
+    None
+}
+
+fn recently_blocked(measured: Option<&LinkMeasurements>, now: u64) -> bool {
+    match measured {
+        Some(m) if m.openai_reachable == Some(false) => m
+            .openai_checked
+            .map(|checked| now.saturating_sub(checked) <= 60_000)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn recently_verified(measured: Option<&LinkMeasurements>, now: u64) -> bool {
+    match measured {
+        Some(m) if m.openai_reachable == Some(true) => m
+            .openai_checked
+            .map(|checked| now.saturating_sub(checked) <= 15 * 60_000)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn remember_candidate(
@@ -998,49 +1421,66 @@ fn endpoint_host(node: &ProxyNode) -> String {
 }
 
 fn do_select(shared: &Shared, node: &ProxyNode) -> Result<(), String> {
-    let (running, plan, secret, selected, tun, traffic_mode) = with_store(shared, |store| {
-        (
-            store.running,
-            store.route_plan.clone(),
-            store.preferences.secret.clone(),
-            store.selected.clone(),
-            store.tun,
-            store.preferences.traffic_mode,
-        )
-    });
+    let (running, plan, secret, selected, tun, traffic_mode, kind) =
+        with_store(shared, |store| {
+            (
+                store.running,
+                store.route_plan.clone(),
+                store.preferences.secret.clone(),
+                store.selected.clone(),
+                store.tun,
+                store.preferences.traffic_mode,
+                store.preferences.kernel,
+            )
+        });
     if !running {
         return Err("请先启动内核".into());
     }
     if !traffic_mode.uses_proxy() {
         return Err("当前是直连模式，不切换节点；请先切换到规则或全局代理".into());
     }
-    let client = CoreClient::new(&secret);
-    if !plan.candidates.is_empty() && !plan.candidates.iter().any(|n| n.id == node.id) {
+    let in_plan = plan.candidates.iter().any(|n| n.id == node.id);
+    if !in_plan {
         let (nodes, definitions) = with_store(shared, |store| {
             (store.nodes.clone(), store.route_plan.definitions.clone())
         });
         let mut candidates = plan.candidates.clone();
         candidates.push(node.clone());
-        let data = configuration::make(
-            &nodes,
-            &secret,
-            tun,
-            Some(&candidates),
-            &definitions,
-            None,
-            Some(&selected),
-            traffic_mode,
-        )?;
-        let text = String::from_utf8_lossy(&data).to_string();
-        client.reload_config(&text)?;
-        with_store(shared, |store| {
-            store.route_plan = RoutePlan {
-                candidates,
-                definitions,
-            };
-        });
+        if kind == KernelKind::Mihomo {
+            let built = configuration::make_for(
+                kind,
+                &nodes,
+                &secret,
+                tun,
+                Some(&candidates),
+                &definitions,
+                None,
+                Some(&selected),
+                traffic_mode,
+            )?;
+            let text = String::from_utf8_lossy(&built.data).to_string();
+            CoreClient::new(kind, &secret).reload_config(&text)?;
+            with_store(shared, |store| {
+                store.route_plan = RoutePlan {
+                    candidates,
+                    definitions,
+                };
+            });
+        } else {
+            // sing-box / Xray 只能通过重启内核把新节点写进配置。
+            with_store(shared, |store| {
+                store.route_plan = RoutePlan {
+                    candidates,
+                    definitions,
+                };
+            });
+            restart_core(shared, Some(node.name.clone()), true)?;
+        }
+    } else if kind == KernelKind::Xray {
+        restart_core(shared, Some(node.name.clone()), true)?;
+    } else {
+        CoreClient::new(kind, &secret).select(&node.name, "SMART")?;
     }
-    client.select(&node.name, "SMART")?;
     with_store(shared, |store| {
         store.selected = node.name.clone();
         store.last_switch = now_ms();
@@ -1054,22 +1494,30 @@ fn do_select(shared: &Shared, node: &ProxyNode) -> Result<(), String> {
 fn with_probe<T>(
     shared: &Shared,
     node: &ProxyNode,
-    operation: impl FnOnce(&ProxyNode) -> T,
+    operation: impl FnOnce(u16) -> T,
 ) -> Result<T, String> {
-    let secret = with_store(shared, |s| s.preferences.secret.clone());
-    let client = CoreClient::new(&secret);
+    let (secret, kind) = with_store(shared, |s| {
+        (s.preferences.secret.clone(), s.preferences.kernel)
+    });
+    if kind == KernelKind::Xray {
+        // Xray 没有 PROBE 组，临时启动单节点内核。
+        let probe = core_probe::EphemeralProbe::start(kind, node)?;
+        return Ok(operation(probe.port));
+    }
+    let client = CoreClient::new(kind, &secret);
     client.select(&node.name, "PROBE")?;
-    Ok(operation(node))
+    Ok(operation(PROBE_PORT))
 }
 
 fn do_check(shared: &Shared, node: &ProxyNode, openai: bool) -> Result<ProbeResult, String> {
     let secret = with_store(shared, |s| s.preferences.secret.clone());
-    let result = with_probe(shared, node, |_| {
-        let client = CoreClient::new(&secret);
+    let result = with_probe(shared, node, |port| {
+        let kind = kernel_of(shared);
+        let client = CoreClient::new(kind, &secret);
         if openai {
-            client.openai_probe(PROBE_PORT)
+            client.openai_probe(port)
         } else {
-            client.internet_probe(PROBE_PORT)
+            client.internet_probe(port)
         }
     })?;
     with_store(shared, |store| {
@@ -1095,21 +1543,30 @@ pub fn select_verified(shared: &Shared, ctx: &egui::Context, node: ProxyNode) {
 }
 
 fn do_select_verified(shared: &Shared, node: ProxyNode) -> Result<(), String> {
-    let (running, secret) = with_store(shared, |s| (s.running, s.preferences.secret.clone()));
+    let (running, secret, kind) = with_store(shared, |s| {
+        (
+            s.running,
+            s.preferences.secret.clone(),
+            s.preferences.kernel,
+        )
+    });
     if !running {
         return Err("请先启动内核或运行一次延迟测试".into());
     }
     if !with_store(shared, |s| s.preferences.traffic_mode).uses_proxy() {
         return Err("当前是直连模式，不切换节点；请先切换到规则或全局代理".into());
     }
-    let client = CoreClient::new(&secret);
     let previous = with_store(shared, |store| {
         store
             .route_nodes()
             .into_iter()
             .find(|n| n.name == store.selected)
     });
-    let sample = client.delay(&node.name, 5000);
+    let sample = if kind == KernelKind::Xray {
+        core_probe::latency(kind, &node, 5000)
+    } else {
+        CoreClient::new(kind, &secret).delay(&node.name, 5000)
+    };
     with_store(shared, |store| {
         store.latencies.insert(node.id.clone(), sample.clone());
         store.save_latencies();
@@ -1118,7 +1575,7 @@ fn do_select_verified(shared: &Shared, node: ProxyNode) -> Result<(), String> {
         return Err("该节点本次 HTTPS 测试未通过，已保留原业务出口".into());
     }
     do_select(shared, &node)?;
-    let result = client.internet_probe(PROXY_PORT);
+    let result = client_of(shared).internet_probe(PROXY_PORT);
     if result.health != crate::logic::model::Health::Healthy {
         if let Some(previous) = previous {
             let _ = do_select(shared, &previous);
@@ -1136,11 +1593,28 @@ fn do_select_verified(shared: &Shared, node: ProxyNode) -> Result<(), String> {
 // ---------------------------------------------------------------- 延迟测试
 
 pub fn begin_latency_all(shared: &Shared, ctx: &egui::Context) {
-    let targets = with_store(shared, |s| s.nodes.clone());
+    let kind = kernel_of(shared);
+    let targets = with_store(shared, |s| {
+        s.nodes
+            .iter()
+            .filter(|node| kind.supports_node(node))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     begin_latency(shared, ctx, targets);
 }
 
 pub fn begin_latency_one(shared: &Shared, ctx: &egui::Context, node: ProxyNode) {
+    let kind = kernel_of(shared);
+    if !kind.supports_node(&node) {
+        with_store(shared, |store| {
+            store.error = Some(format!(
+                "{} 内核不支持该节点协议，请更换内核或选择其他节点",
+                kind.title()
+            ));
+        });
+        return;
+    }
     begin_latency(shared, ctx, vec![node]);
 }
 
@@ -1226,10 +1700,16 @@ fn measure_latencies_inner(
     if targets.is_empty() {
         return;
     }
-    let secret = with_store(shared, |s| s.preferences.secret.clone());
+    let (secret, kind) = with_store(shared, |s| {
+        (s.preferences.secret.clone(), s.preferences.kernel)
+    });
     let next = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel::<(String, NodeLatency)>();
-    let concurrency = 6.min(targets.len());
+    let concurrency = if kind == KernelKind::Xray {
+        3.min(targets.len())
+    } else {
+        6.min(targets.len())
+    };
 
     std::thread::scope(|scope| {
         for _ in 0..concurrency {
@@ -1238,7 +1718,6 @@ fn measure_latencies_inner(
             let cancel = Arc::clone(cancel);
             let next = Arc::clone(&next);
             scope.spawn(move || {
-                let client = CoreClient::new(&secret);
                 loop {
                     if cancel.load(Ordering::SeqCst) {
                         break;
@@ -1247,7 +1726,11 @@ fn measure_latencies_inner(
                     if index >= targets.len() {
                         break;
                     }
-                    let latency = client.delay(&targets[index].name, 5000);
+                    let latency = if kind == KernelKind::Xray {
+                        core_probe::latency(kind, &targets[index], 5000)
+                    } else {
+                        CoreClient::new(kind, &secret).delay(&targets[index].name, 5000)
+                    };
                     let _ = tx.send((targets[index].id.clone(), latency));
                 }
             });
@@ -1280,19 +1763,18 @@ pub fn start_monitor(shared: &Shared) {
     let shared = Arc::clone(shared);
     let ctx = ctx.clone();
     std::thread::spawn(move || loop {
-        let (running, busy, testing, interval, dynamic) = with_store(&shared, |store| {
+        let (running, busy, testing, interval) = with_store(&shared, |store| {
             (
                 store.running,
                 store.busy,
                 store.is_testing_latency,
                 store.preferences.interval.max(1),
-                store.dynamic_mode,
             )
         });
         if !running || flag.load(Ordering::SeqCst) {
             break;
         }
-        let seconds = if dynamic { 1 } else { interval.min(60) };
+        let seconds = interval;
         let mut slept = 0u64;
         while slept < seconds * 1000 {
             if flag.load(Ordering::SeqCst) {
@@ -1321,14 +1803,13 @@ pub fn inspect_now(shared: &Shared, ctx: &egui::Context) {
 }
 
 fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
-    let (running, selected, dynamic, automatic, secret, active_mode) =
+    let (running, selected, dynamic, automatic, active_mode) =
         with_store(shared, |store| {
             (
                 store.running,
                 store.selected.clone(),
                 store.dynamic_mode,
                 store.preferences.automatic,
-                store.preferences.secret.clone(),
                 store.active_mode,
             )
         });
@@ -1337,7 +1818,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     }
     // 直连模式没有代理节点可切，只确认内核存活与本地端口出网。
     if !with_store(shared, |s| s.preferences.traffic_mode).uses_proxy() {
-        let client = CoreClient::new(&secret);
+        let client = client_of(shared);
         if client.version().is_err() {
             log(shared, "内核失联，正在恢复系统网络");
             do_stop(shared)?;
@@ -1365,9 +1846,18 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
         store.route_nodes().into_iter().find(|n| n.name == selected)
     });
     let Some(current) = current else {
+        // 当前节点已从订阅或计划中消失：不能静默返回，否则界面会停在旧状态。
+        with_store(shared, |store| {
+            let text = "当前线路已失效，请重新选择节点或重新连接";
+            if store.routing_status != text {
+                store.routing_status = text.into();
+                store.internet_status = "当前线路不在可用列表中".into();
+                store.log(text);
+            }
+        });
         return Ok(());
     };
-    let client = CoreClient::new(&secret);
+    let client = client_of(shared);
 
     if client.version().is_err() {
         log(shared, "内核失联，正在恢复系统网络");
@@ -1388,16 +1878,27 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
         with_store(shared, |store| store.internet_status = network_text.into());
     }
 
-    // OpenAI 可达性只作为质量提示，不参与线路存活判定：能正常出网就先保持连接，
-    // 否则 AI 模式下会反复切换节点，表现为节点和状态一直在闪。
+    // 出网正常不代表 AI 线路可用：AI 模式下 OpenAI 明确失败（地区限制 / 离线）
+    // 需要立即切换，不等待连续失败阈值。AI 模式缩短复检周期，普通模式只做质量提示。
+    let openai_interval = if active_mode == Some(RoutingMode::Ai) {
+        10_000
+    } else {
+        30_000
+    };
     let last_openai = with_store(shared, |s| s.last_openai_probe);
+    let mut openai_failed = false;
     if internet.health == crate::logic::model::Health::Healthy
-        && now_ms().saturating_sub(last_openai) >= 30_000
+        && now_ms().saturating_sub(last_openai) >= openai_interval
     {
         let ai = client.openai_probe(PROXY_PORT);
         with_store(shared, |store| store.last_openai_probe = now_ms());
         let text = format!("OpenAI：{}", ai.detail);
         with_store(shared, |store| store.openai_status = text);
+        openai_failed = active_mode == Some(RoutingMode::Ai)
+            && matches!(
+                ai.health,
+                crate::logic::model::Health::Blocked | crate::logic::model::Health::Offline
+            );
     } else if internet.health != crate::logic::model::Health::Healthy {
         with_store(shared, |store| {
             store.openai_status = "OpenAI：等待网络恢复".into()
@@ -1413,10 +1914,8 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
                 store.routing_status = "已打通".into();
             }
         });
-        if with_store(shared, |s| s.dynamic_mode && !s.system_proxy && !s.tun) {
-            if SystemProxy::enable().is_ok() {
-                with_store(shared, |store| store.system_proxy = true);
-            }
+        if openai_failed {
+            return do_openai_failover(shared, force);
         }
         return Ok(());
     }
@@ -1523,8 +2022,128 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     }
 }
 
+/// AI 模式下 OpenAI 明确不可达时的快速切换：跳过连续失败阈值，立即用 PROBE 组
+/// 复检备用线路并切到最先确认可达的节点。30 秒内只允许一次，避免线路来回抖动。
+fn do_openai_failover(shared: &Shared, force: bool) -> Result<(), String> {
+    let (automatic, selected, latencies, candidates, measurements) = with_store(shared, |store| {
+        (
+            store.preferences.automatic,
+            store.selected.clone(),
+            store.latencies.clone(),
+            store.route_nodes(),
+            store.measurements.clone(),
+        )
+    });
+    if !automatic && !force {
+        log(shared, "OpenAI 不可达，但自动切换已关闭，保留当前线路");
+        return Ok(());
+    }
+    let now = now_ms();
+    let last = with_store(shared, |s| s.last_openai_failover);
+    if now.saturating_sub(last) < 30_000 {
+        log(shared, "OpenAI 探测失败，距上次 AI 线路切换不足 30 秒，等待下一轮复检");
+        return Ok(());
+    }
+
+    // 先记录当前线路的 OpenAI 结果，避免后续仍按“已验证”优先选回它。
+    // measurements 以节点 id 为键，不能用 selected 里的节点名称。
+    let current_id = candidates
+        .iter()
+        .find(|node| node.name == selected)
+        .map(|node| node.id.clone());
+    with_store(shared, |store| {
+        if let Some(id) = &current_id {
+            let mut measured = store.measurements.get(id).cloned().unwrap_or_default();
+            measured.openai_reachable = Some(false);
+            measured.openai_checked = Some(now);
+            store.measurements.insert(id.clone(), measured);
+        }
+        store.last_openai_failover = now;
+        store.openai_status = "OpenAI：不可达，正在切换线路".into();
+        store.save_measurements();
+    });
+
+    let verified = |node: &ProxyNode| {
+        measurements
+            .get(&node.id)
+            .and_then(|m| {
+                (m.openai_reachable == Some(true))
+                    .then(|| m.openai_checked)
+                    .flatten()
+                    .map(|checked| now.saturating_sub(checked) <= 15 * 60_000)
+            })
+            .unwrap_or(false)
+    };
+    let cooling = |node: &ProxyNode| {
+        measurements
+            .get(&node.id)
+            .and_then(|m| {
+                (m.openai_reachable == Some(false))
+                    .then(|| m.openai_checked)
+                    .flatten()
+                    .map(|checked| now.saturating_sub(checked) <= 60_000)
+            })
+            .unwrap_or(false)
+    };
+
+    let mut alternatives: Vec<ProxyNode> = candidates
+        .into_iter()
+        .filter(|node| node.name != selected && !cooling(node))
+        .collect();
+    alternatives = NodeRanking::sorted(
+        &alternatives,
+        &latencies,
+        crate::logic::model::NodeSortOrder::Latency,
+    );
+    // 稳定排序：最近确认过 OpenAI 可达的线路排在最前面，其余按延迟顺序复检。
+    alternatives.sort_by_key(|node| !verified(node));
+    alternatives.truncate(8);
+
+    if alternatives.is_empty() {
+        log(shared, "OpenAI 探测失败，但没有可复检的备用线路，保留当前线路");
+        with_store(shared, |store| {
+            store.openai_status = "OpenAI：不可达，暂无可用备用线路".into();
+        });
+        return Ok(());
+    }
+
+    let deadline = now_ms() + 30_000;
+    for node in alternatives {
+        if now_ms() >= deadline {
+            break;
+        }
+        match do_check(shared, &node, true) {
+            Ok(result) if result.health == crate::logic::model::Health::Healthy => {
+                do_select(shared, &node)?;
+                with_store(shared, |store| {
+                    store.openai_status = format!(
+                        "OpenAI 探测失败，已切换至 {} · {} ms",
+                        node.name, result.milliseconds
+                    );
+                    // 新线路立刻参加下一轮 OpenAI 复检。
+                    store.last_openai_probe = 0;
+                    store.save_measurements();
+                });
+                log(
+                    shared,
+                    &format!("OpenAI 探测失败，已立即切换至 {}；已有请求可能需要重试", node.name),
+                );
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) => log(shared, &format!("备用线路 {} 复检失败：{error}", node.name)),
+        }
+    }
+    with_store(shared, |store| {
+        store.openai_status = "OpenAI：不可达，备用线路均未通过复检".into();
+        store.save_measurements();
+    });
+    log(shared, "OpenAI 探测失败，备用线路均未通过复检，保留当前线路等待下一轮");
+    Ok(())
+}
+
 fn do_rebuild_routes(shared: &Shared) -> Result<(), String> {
-    let (nodes, plan, secret, selected, tun, explore, round, traffic_mode) =
+    let (nodes, plan, secret, selected, tun, explore, round, traffic_mode, kind) =
         with_store(shared, |store| {
             (
                 store.nodes.clone(),
@@ -1535,6 +2154,7 @@ fn do_rebuild_routes(shared: &Shared) -> Result<(), String> {
                 store.preferences.explore_multihop == Some(true),
                 store.search_round,
                 store.preferences.traffic_mode,
+                store.preferences.kernel,
             )
         });
     let latencies = with_store(shared, |s| s.latencies.clone());
@@ -1556,7 +2176,8 @@ fn do_rebuild_routes(shared: &Shared) -> Result<(), String> {
             definitions.push(node.clone());
         }
     }
-    let data = configuration::make(
+    let built = configuration::make_for(
+        kind,
         &nodes,
         &secret,
         tun,
@@ -1566,25 +2187,44 @@ fn do_rebuild_routes(shared: &Shared) -> Result<(), String> {
         Some(&selected),
         traffic_mode,
     )?;
-    let client = CoreClient::new(&secret);
-    client.reload_config(&String::from_utf8_lossy(&data))?;
-    with_store(shared, |store| {
-        store.search_round = round + 1;
-        store.route_plan = RoutePlan {
-            candidates,
-            definitions,
-        };
-        store.log("已下发下一批候选链路");
-        store.publish_route();
-    });
+    for warning in &built.warnings {
+        log(shared, warning);
+    }
+    if kind == KernelKind::Mihomo {
+        CoreClient::new(kind, &secret).reload_config(&String::from_utf8_lossy(&built.data))?;
+        with_store(shared, |store| {
+            store.search_round = round + 1;
+            store.route_plan = RoutePlan {
+                candidates,
+                definitions,
+            };
+            store.log("已下发下一批候选链路");
+            store.publish_route();
+        });
+    } else {
+        with_store(shared, |store| {
+            store.search_round = round + 1;
+            store.route_plan = RoutePlan {
+                candidates,
+                definitions,
+            };
+            store.log("已下发下一批候选链路（重启内核生效）");
+            store.publish_route();
+        });
+        restart_core(shared, Some(selected), true)?;
+    }
     do_ensure_route(shared, true, None)
 }
 
 // ---------------------------------------------------------------- 流量
 
 fn start_traffic(shared: &Shared) {
-    let (secret, data) = with_store(shared, |store| {
-        (store.preferences.secret.clone(), Arc::clone(&store.traffic))
+    let (secret, kind, data) = with_store(shared, |store| {
+        (
+            store.preferences.secret.clone(),
+            store.preferences.kernel,
+            Arc::clone(&store.traffic),
+        )
     });
     if let Some(flag) = with_store(shared, |store| store.traffic_stop.take()) {
         flag.store(true, Ordering::SeqCst);
@@ -1592,7 +2232,7 @@ fn start_traffic(shared: &Shared) {
     let flag = Arc::new(AtomicBool::new(false));
     with_store(shared, |store| store.traffic_stop = Some(Arc::clone(&flag)));
     traffic::start(
-        CoreClient::new(&secret),
+        CoreClient::new(kind, &secret),
         data,
         flag,
         crate::logic::model::random_hex(8),
@@ -1601,9 +2241,10 @@ fn start_traffic(shared: &Shared) {
 
 /// 启动实时连接轮询与 IP 定位（地球面板数据源）。
 fn start_activity(shared: &Shared) {
-    let (secret, data) = with_store(shared, |store| {
+    let (secret, kind, data) = with_store(shared, |store| {
         (
             store.preferences.secret.clone(),
+            store.preferences.kernel,
             Arc::clone(&store.activity),
         )
     });
@@ -1612,14 +2253,59 @@ fn start_activity(shared: &Shared) {
     }
     let flag = Arc::new(AtomicBool::new(false));
     with_store(shared, |store| store.activity_stop = Some(Arc::clone(&flag)));
-    activity::start(shared, CoreClient::new(&secret), data, flag);
+    activity::start(shared, CoreClient::new(kind, &secret), data, flag);
+}
+
+/// 切换代理内核。运行中会自动用新内核重启；Xray 不支持 TUN，需先关闭。
+pub fn change_kernel(shared: &Shared, ctx: &egui::Context, kind: KernelKind) {
+    perform(shared, ctx, move |store, _ctx| {
+        let (current, running, tun, recovery) = with_store(store, |s| {
+            (s.preferences.kernel, s.running, s.tun, s.recovery)
+        });
+        if current == kind {
+            return;
+        }
+        if recovery {
+            fail(store, "请先恢复上次网络设置，再切换内核");
+            return;
+        }
+        if tun && !kind.capabilities().tun {
+            fail(store, "请先关闭 TUN，再切换到不支持 TUN 的内核");
+            return;
+        }
+        with_store(store, |s| {
+            s.preferences.kernel = kind;
+            s.core.set_kind(kind);
+            s.save_preferences();
+            s.rule_status = match kind.capabilities().rules {
+                RulesSupport::Provider => "尚未手动更新，内核运行后每小时自动刷新".into(),
+                RulesSupport::Restart => "由内核自动刷新，手动更新会重启内核".into(),
+                RulesSupport::Builtin => "使用内置 geo 数据，不支持在线更新".into(),
+            };
+            s.log(&format!("切换内核：{}", kind.title()));
+        });
+        if running {
+            if let Err(error) = restart_core(store, None, true) {
+                // 新内核启动失败时回滚到原内核，避免界面与已停止的内核状态不一致。
+                with_store(store, |s| {
+                    s.preferences.kernel = current;
+                    s.core.set_kind(current);
+                    s.save_preferences();
+                });
+                let restored = restart_core(store, None, true).is_ok();
+                with_store(store, |s| {
+                    if !restored {
+                        s.recovery = true;
+                        s.log("内核切换回滚失败，请停止并恢复网络");
+                    }
+                });
+                fail(store, format!("内核切换失败：{error}"));
+            }
+        }
+    });
 }
 
 pub fn shutdown(shared: &Shared) {
     with_store(shared, |s| s.epoch = s.epoch.wrapping_add(1));
     let _ = do_stop(shared);
-}
-
-pub fn core_executable() -> std::path::PathBuf {
-    paths::core_binary()
 }

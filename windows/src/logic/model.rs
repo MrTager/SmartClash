@@ -145,6 +145,9 @@ pub struct Preferences {
     pub secret: String,
     #[serde(default = "default_secret")]
     pub subscription_token: String,
+    /// 当前使用的代理内核；旧配置缺省为 Mihomo。
+    #[serde(default)]
+    pub kernel: crate::logic::kernel::KernelKind,
 }
 
 fn default_interval() -> u64 {
@@ -175,6 +178,7 @@ impl Default for Preferences {
             chain: None,
             secret: default_secret(),
             subscription_token: default_secret(),
+            kernel: crate::logic::kernel::KernelKind::Mihomo,
         }
     }
 }
@@ -467,6 +471,36 @@ pub struct ConnectionSnapshot {
     pub upload_total: u64,
     #[serde(default, rename = "downloadTotal")]
     pub download_total: u64,
-    #[serde(default)]
+    // mihomo 在空闲时返回 `"connections": null`，而 `serde(default)`
+    // 只处理字段缺失，必须显式把 null 折叠成空列表。
+    #[serde(default, deserialize_with = "null_as_default")]
     pub connections: Vec<CoreConnection>,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_snapshot_accepts_null_and_missing_connections() {
+        let idle: ConnectionSnapshot = serde_json::from_str(
+            r#"{"downloadTotal":1,"uploadTotal":2,"connections":null,"memory":0}"#,
+        )
+        .expect("空闲快照应能解析");
+        assert!(idle.connections.is_empty());
+        assert_eq!(idle.download_total, 1);
+        assert_eq!(idle.upload_total, 2);
+
+        let minimal: ConnectionSnapshot =
+            serde_json::from_str("{}").expect("缺失字段应使用默认值");
+        assert!(minimal.connections.is_empty());
+    }
 }

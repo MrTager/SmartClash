@@ -216,7 +216,9 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
                     .color(widgets::TEXT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (color, text) = if activity.connected {
+                let (color, text) = if !activity.supported {
+                    (widgets::MUTED, "当前内核不提供实时连接".to_string())
+                } else if activity.connected {
                     (widgets::GOOD, format!("实时 · {} 个连接", activity.connections.len()))
                 } else if store.running {
                     (widgets::MUTED, "正在连接内核…".to_string())
@@ -389,8 +391,13 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
 
         // 未连接时底部居中提示。
         if !activity.enabled {
+            let overlay = if activity.supported {
+                "连接后显示节点与请求目标的真实连线"
+            } else {
+                "当前内核不提供实时连接视图"
+            };
             let galley = painter.layout_no_wrap(
-                "连接后显示节点与请求目标的真实连线".into(),
+                overlay.into(),
                 FontId::proportional(12.0),
                 white(166),
             );
@@ -441,7 +448,7 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
     // ---- 底部操作行 ----
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        hint(ui, "拖动旋转 · 滚轮缩放 · IP 位置为近似值");
+        hint(ui, "拖动旋转 · 滚轮缩放 · IP 位置为近似值，缺失时按本机 DNS 估算");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::new(
@@ -465,11 +472,6 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         draw_connections(ui, view, store, &activity);
     }
 
-    ui.add_space(2.0);
-    hint(
-        ui,
-        "IP 位置由 ipwho.is 提供并缓存 24 小时；目标 IP 缺失时按本机 DNS 估算。未定位与直连请求保留在列表。连线表示地理关系。",
-    );
     ui.add_space(2.0);
 }
 
@@ -513,7 +515,9 @@ fn draw_connections(
     if activity.connections.is_empty() {
         hint(
             ui,
-            if activity.enabled {
+            if !activity.supported {
+                "当前内核不提供实时连接列表"
+            } else if activity.enabled {
                 "当前没有活跃请求"
             } else {
                 "连接后显示实时请求"

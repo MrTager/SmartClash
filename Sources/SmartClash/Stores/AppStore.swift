@@ -34,6 +34,8 @@ final class AppStore: ObservableObject {
     var rulesScheduleTask: Task<Void, Never>?
     var rulesAppliedToCore = false
     var trafficMode: TrafficMode { preferences.trafficMode ?? .rule }
+    var kernel: KernelKind { preferences.kernel ?? .mihomo }
+    var capabilities: KernelCapabilities { kernel.capabilities }
     var ruleProviderBaseURL: String? { persistsChanges ? aggregate.ruleBaseURL : nil }
     let traffic: TrafficStore
     let activity: NetworkActivityStore
@@ -87,6 +89,7 @@ final class AppStore: ObservableObject {
                 preferences = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: settings))
             }
             preferences.interval = max(1, min(3600, preferences.interval))
+            engine.configure(kind: preferences.kernel ?? .mihomo)
             try Files.write(JSONEncoder().encode(preferences), to: settings)
             api = CoreClient(secret: preferences.secret)
             aggregate = AggregateServer(token: preferences.subscriptionToken)
@@ -201,47 +204,51 @@ final class AppStore: ObservableObject {
         guard !dynamicMode else { throw ProxyError.message("智能路由运行中，请停止后更新订阅") }
         guard !tun else { throw ProxyError.message("更新订阅前请先关闭 TUN 并停止内核") }
         let update = try await SubscriptionService.update(preferences.sources, throughProxy: running)
-        if running {
-            let data = try Configuration.make(nodes: update.nodes, secret: preferences.secret, tun: false, routes: routePlan?.candidates, extraProxies: routePlan?.definitions ?? [], outboundInterface: outboundInterface, preferredName: selected, trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
-            let temp = Files.root.appendingPathComponent("reload.json")
-            try Files.write(data, to: temp)
-            let test = try await Command.run(engine.executable.path, ["-t", "-d", Files.root.path, "-f", temp.path])
-            guard test.code == 0 else { throw ProxyError.message("更新配置未通过内核校验，继续使用旧配置") }
-            try await api.request("/configs?force=true", method: "PUT", body: ["path": temp.path])
-            let available = routePlan?.candidates ?? update.nodes
-            selected = available.first(where: { $0.name == selected })?.name ?? available[0].name
-            try await api.select(selected, group: "SMART")
-            try Files.write(data, to: Files.root.appendingPathComponent("config.json"))
-        }
         nodes = update.nodes; try aggregate.update(nodes); lastUpdate = Date()
-        log("订阅已合并：\(nodes.count) 个去重节点")
         for warning in update.warnings { log(warning) }
+        if running { try await reloadRunningCore() }
+        log("订阅已合并：\(nodes.count) 个去重节点")
     }
     func start(tun wanted: Bool = false, preferredName requestedName: String? = nil, purpose: CoreStartPurpose = .connection) async throws {
         guard persistsChanges else { throw ProxyError.message("离线验收实例不启动真实内核") }
         guard !recovery else { throw ProxyError.message("请先恢复上次网络设置") }
+        if wanted && !kernel.capabilities.tun { throw ProxyError.message("\(kernel.title) 内核不支持 TUN，请改用 Mihomo 或 sing-box") }
         if trafficMode == .rule && purpose == .connection { try await ensureRulesReady() }
         let known = NodeRanking.connectionCandidates(routeNodes, latencies: latencies).first
         let preferredName = requestedName ?? known.flatMap { latencies[$0.id]?.reachable == true && latencies[$0.id]?.isFresh() == true ? $0.name : nil }
         outboundInterface = try await NetworkEnvironment.defaultInterface(forTun: wanted)
-        let data = try Configuration.make(nodes: nodes, secret: preferences.secret, tun: wanted, routes: routePlan?.candidates, extraProxies: routePlan?.definitions ?? [], outboundInterface: outboundInterface, preferredName: preferredName, trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
-        do { try await engine.start(data: data, tun: wanted, api: api) }
+        let built = try KernelConfiguration.make(kind: kernel, nodes: nodes, secret: preferences.secret, tun: wanted,
+            routes: routePlan?.candidates, extraProxies: routePlan?.definitions ?? [],
+            outboundInterface: outboundInterface, preferredName: preferredName,
+            trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
+        for warning in built.warnings { log(warning) }
+        do { try await engine.start(data: built.data, tun: wanted, api: api, kind: kernel) }
         catch { recovery = engine.recoveryNeeded || proxy.hasBackup; throw error }
         running = true; tun = wanted
         rulesAppliedToCore = false
-        if ruleProviderBaseURL != nil && ruleSnapshot != nil {
+        if kernel.capabilities.rules == .provider, ruleProviderBaseURL != nil, ruleSnapshot != nil {
             do { try await api.updateRuleProviders(); rulesAppliedToCore = ruleSnapshot != nil }
             catch {
                 if trafficMode == .rule { try? await stop(); throw error }
                 logBackground("规则暂未载入内核，\(trafficMode.title)继续运行")
             }
+        } else if kernel.capabilities.rules != .provider {
+            rulesAppliedToCore = true
         }
         selected = routeNodes.first(where: { $0.name == preferredName })?.name ?? routeNodes.first?.name ?? ""
         internetStatus = "内核已启动，尚未验证出网"
         publishRoute()
         let runID = UUID().uuidString
-        traffic.start(client: api, runID: runID)
-        activity.start(client: api, traffic: traffic, runID: runID)
+        if kernel == .xray {
+            traffic.startPolling(executable: engine.executable, runID: runID)
+        } else {
+            traffic.start(client: api, runID: runID)
+        }
+        if kernel.capabilities.connections {
+            activity.start(client: api, traffic: traffic, runID: runID)
+        } else {
+            activity.stop()
+        }
         failures = 0; lastSwitch = .distantPast
         if purpose.monitorsConnections { startMonitor() }
         log(wanted ? "TUN 已启动" : (purpose == .latencyTest ? "仅测速内核已启动，未接管系统网络" : "代理内核已启动"))
@@ -363,7 +370,7 @@ final class AppStore: ObservableObject {
             routingStatus = "直连模式"; internetStatus = "直连模式已开启"; return
         }
         if nodes.isEmpty { try await refresh() }
-        searchRound = 0; dynamicMode = true; preferences.automatic = true
+        searchRound = 0; dynamicMode = kernel == .mihomo; preferences.automatic = true
         // Start with the complete single-hop pool; never capture traffic on an untested chain.
         routePlan = RoutePlan(candidates: nodes, definitions: [])
         do {
@@ -392,7 +399,7 @@ final class AppStore: ObservableObject {
         if mode == .lowLatency, let current = candidates.first, latencies[current.id]?.reachable == true,
            latencies[current.id]?.isFresh() == true {
             try await select(current)
-            let result = try await withProbe(current) { try await api.internetProbe(port: Configuration.probePort) }
+            let result = try await withProbe(current) { port in try await api.internetProbe(port: port) }
             if result.health == .healthy {
                 internetStatus = "HTTPS 出网已验证 · \(result.milliseconds) ms"; routingStatus = "已打通"; activeMode = mode; return
             }
@@ -418,7 +425,7 @@ final class AppStore: ObservableObject {
                     guard speedAttempts < 3, Date() < deadline else { break }
                     speedAttempts += 1
                     speedTested.insert(node.id)
-                    let sample = try await withProbe(node) { try await api.throughput(port: Configuration.probePort) }
+                    let sample = try await withProbe(node) { port in try await api.throughput(port: port) }
                     var measured = measurements[node.id] ?? LinkMeasurements(); measured.throughput = sample
                     measurements[node.id] = measured
                 }
@@ -427,7 +434,7 @@ final class AppStore: ObservableObject {
             for node in ModeRanking.best(eligible, mode: mode, latencies: latencies, measurements: measurements) {
                 let previous = routeNodes.first(where: { $0.name == selected })
                 try await select(node)
-                let result = try await withProbe(node) { try await api.internetProbe(port: Configuration.probePort) }
+                let result = try await withProbe(node) { port in try await api.internetProbe(port: port) }
                 if result.health == .healthy {
                     internetStatus = "HTTPS 出网已验证 · \(result.milliseconds) ms"
                     routingStatus = "已打通"; activeMode = mode; saveLatencies(); saveMeasurements(); return
@@ -453,6 +460,8 @@ final class AppStore: ObservableObject {
         if let data = try? JSONEncoder().encode(measurements) { try? Files.write(data, to: Files.root.appendingPathComponent("link-measurements.json")) }
     }
     private func installNextBatch() async throws {
+        // sing-box 的 SMART 组已包含全部节点，Xray 只能重启应用新配置；动态多跳仅保留给 Mihomo。
+        guard kernel == .mihomo else { return }
         while probeInFlight || routeMutationInFlight { try await Task.sleep(nanoseconds: 100_000_000) }
         routeMutationInFlight = true; defer { routeMutationInFlight = false }
         try Task.checkCancellation()
@@ -501,6 +510,8 @@ final class AppStore: ObservableObject {
         }
     }
     private func startStandbyMonitor() {
+        // 备用线路轮询依赖运行时追加配置；sing-box / Xray 使用即时选路，不做后台预生成。
+        guard kernel == .mihomo else { return }
         standbyMonitor?.cancel()
         standbyMonitor = Task { [weak self] in
             while !Task.isCancelled {
@@ -528,14 +539,26 @@ final class AppStore: ObservableObject {
     func select(_ node: ProxyNode) async throws {
         try Task.checkCancellation()
         guard running else { throw ProxyError.message("请先启动内核") }
-        if let plan = routePlan, !plan.candidates.contains(where: { $0.id == node.id }) {
-            let candidates = plan.candidates + [node]
-            let data = try Configuration.make(nodes: nodes, secret: preferences.secret, tun: tun, routes: candidates,
-                extraProxies: plan.definitions, outboundInterface: outboundInterface, preferredName: selected, trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
-            try await api.request("/configs?force=true", method: "PUT", body: ["payload": String(decoding: data, as: UTF8.self)])
-            routePlan = RoutePlan(candidates: candidates, definitions: plan.definitions)
+        if kernel.capabilities.liveSwitch {
+            if let plan = routePlan, !plan.candidates.contains(where: { $0.id == node.id }) {
+                let candidates = plan.candidates + [node]
+                if kernel == .mihomo {
+                    let built = try KernelConfiguration.make(kind: kernel, nodes: nodes, secret: preferences.secret, tun: tun,
+                        routes: candidates, extraProxies: plan.definitions, outboundInterface: outboundInterface,
+                        preferredName: selected, trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
+                    try await engine.validate(data: built.data)
+                    try await api.request("/configs?force=true", method: "PUT", body: ["payload": String(decoding: built.data, as: UTF8.self)])
+                }
+                routePlan = RoutePlan(candidates: candidates, definitions: plan.definitions)
+            }
+            try await api.select(node.name, group: "SMART")
+        } else {
+            if let plan = routePlan, !plan.candidates.contains(where: { $0.id == node.id }) {
+                routePlan = RoutePlan(candidates: plan.candidates + [node], definitions: plan.definitions)
+            }
+            // Xray 没有节点选择接口，只能带着新出口重启内核。
+            try await restartCore(preferredName: node.name)
         }
-        try await api.select(node.name, group: "SMART")
         selected = node.name; lastSwitch = Date(); failures = 0; log("切换至 \(node.name)")
         publishRoute()
     }
@@ -551,12 +574,12 @@ final class AppStore: ObservableObject {
         guard running else { throw ProxyError.message("请先启动内核或运行一次延迟测试") }
         guard trafficMode != .direct else { throw ProxyError.message("直连模式不使用代理节点，请先切换流量模式") }
         let previous = routeNodes.first(where: { $0.name == selected })
-        let sample = await api.delay(node.name)
+        let sample = await latencySample(node)
         try Task.checkCancellation()
         latencies[node.id] = sample; saveLatencies()
         guard sample.reachable else { throw ProxyError.message("该节点本次 HTTPS 测试未通过，已保留原业务出口") }
         try await select(node)
-        let result = try await withProbe(node) { try await api.internetProbe(port: Configuration.probePort) }
+        let result = try await withProbe(node) { port in try await api.internetProbe(port: port) }
         guard result.health == .healthy else {
             if let previous { try await select(previous) }
             throw ProxyError.message("切换后的业务出网验证未通过，已尝试恢复原出口")

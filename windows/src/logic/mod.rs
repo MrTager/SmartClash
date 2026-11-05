@@ -1,7 +1,10 @@
 pub mod chain;
 pub mod configuration;
+pub mod convert;
 pub mod dynamic_router;
 pub mod health;
+pub mod kernel;
+pub mod kernel_config;
 pub mod model;
 pub mod ranking;
 pub mod subscription;

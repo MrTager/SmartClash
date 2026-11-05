@@ -225,6 +225,72 @@ pub fn toggle_row(
 
 // ---- 复合组件 -------------------------------------------------------------
 
+/// 代理内核选择：Mihomo / sing-box / Xray，并说明当前能力差异。
+pub fn kernel_controls(
+    store: &mut crate::state::Store,
+    ui: &mut Ui,
+    pending: &mut Vec<super::Action>,
+) {
+    use crate::logic::kernel::{KernelKind, RulesSupport};
+    let current = store.preferences.kernel;
+    let interactive = !store.busy && !store.stopping && !store.recovery;
+    card(ui, Some("代理内核"), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for candidate in KernelKind::ALL {
+                let active = current == candidate;
+                let fill = if active { ACCENT_SOFT } else { SURFACE_ALT };
+                let stroke_color = if active { ACCENT } else { BORDER };
+                let text_color = if active {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(170, 178, 192)
+                };
+                if ui
+                    .add_enabled(
+                        interactive,
+                        egui::Button::new(
+                            RichText::new(candidate.title()).size(13.0).color(text_color),
+                        )
+                        .fill(fill)
+                        .stroke(Stroke::new(1.0, stroke_color)),
+                    )
+                    .clicked()
+                    && !active
+                {
+                    pending.push(super::Action::Kernel(candidate));
+                }
+            }
+        });
+        ui.add_space(6.0);
+        hint(ui, current.description());
+        ui.add_space(4.0);
+        let caps = current.capabilities();
+        let mut facts = Vec::new();
+        facts.push(if caps.tun { "TUN 可用" } else { "不支持 TUN" });
+        facts.push(match caps.rules {
+            RulesSupport::Provider => "规则可在线更新",
+            RulesSupport::Restart => "规则由内核刷新",
+            RulesSupport::Builtin => "内置 geo 规则",
+        });
+        facts.push(if caps.connections {
+            "实时连接可用"
+        } else {
+            "无实时连接列表"
+        });
+        facts.push(if caps.live_switch {
+            "节点热切换"
+        } else {
+            "切换节点重启内核"
+        });
+        hint(ui, &facts.join(" · "));
+        if store.running {
+            ui.add_space(2.0);
+            hint(ui, "切换内核会重启当前内核，已有连接会中断。");
+        }
+    });
+}
+
 /// 流量模式：规则代理 / 全局代理 / 直连，对应 Mihomo 的 mode 字段。
 pub fn traffic_mode_controls(
     store: &mut crate::state::Store,
@@ -283,12 +349,62 @@ pub fn traffic_mode_controls(
             );
         });
         ui.add_space(4.0);
+        let caps = store.preferences.kernel.capabilities();
         hint(
             ui,
             if store.running {
-                "切换模式会关闭旧连接，已有请求可能需要重试。"
+                if caps.mode_switch_restarts {
+                    "切换模式会重启内核，已有请求可能需要重试。"
+                } else {
+                    "切换模式会关闭旧连接，已有请求可能需要重试。"
+                }
             } else {
                 "尚未连接，模式将在启动内核时写入配置。"
+            },
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.hyperlink_to(
+                RichText::new("规则源：MrTager/SmartClash-Rules").size(12.0),
+                crate::logic::configuration::RULES_REPOSITORY,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_update = store.running
+                    && !store.busy
+                    && !matches!(caps.rules, crate::logic::kernel::RulesSupport::Builtin);
+                if ui
+                    .add_enabled(can_update, egui::Button::new("立即更新规则"))
+                    .on_disabled_hover_text(match caps.rules {
+                        crate::logic::kernel::RulesSupport::Provider => "内核运行时才能更新规则",
+                        crate::logic::kernel::RulesSupport::Restart => {
+                            "内核运行时才能更新规则（会重启内核）"
+                        }
+                        crate::logic::kernel::RulesSupport::Builtin => {
+                            "Xray 使用内置 geo 数据，无法在线更新"
+                        }
+                    })
+                    .clicked()
+                {
+                    pending.push(super::Action::UpdateRules);
+                }
+            });
+        });
+        ui.add_space(2.0);
+        hint(ui, &store.rule_status);
+        hint(
+            ui,
+            match caps.rules {
+                crate::logic::kernel::RulesSupport::Provider => {
+                    "国内域名与国内 IP 直连规则，经 SMART 组下载，内核运行期间每小时自动刷新；失败保留旧规则。"
+                }
+                crate::logic::kernel::RulesSupport::Restart => {
+                    "国内规则集由 sing-box 按小时自动下载刷新；手动更新会重启内核触发检查。"
+                }
+                crate::logic::kernel::RulesSupport::Builtin => {
+                    "Xray 使用内置 geosite:cn / geoip:cn 分流，规则无法在线更新。"
+                }
             },
         );
     });
@@ -369,37 +485,102 @@ pub fn routing_controls(
                 }
             });
         });
-        if let Some(node) = store
-            .node_list_nodes()
-            .into_iter()
-            .find(|n| n.name == store.selected)
-        {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if let Some(latency) = store.latencies.get(&node.id).and_then(|l| l.milliseconds) {
-                    hint(ui, &format!("HTTPS：{latency} ms"));
-                }
-                if let Some(speed) = store
-                    .measurements
-                    .get(&node.id)
-                    .and_then(|m| m.throughput.as_ref())
+        selected_node_details(store, ui);
+    });
+}
+
+/// 线路模式只读摘要：链式代理页用于确认当前模式并重新选路，切换入口仍在概览页。
+pub fn routing_summary(
+    store: &mut crate::state::Store,
+    ui: &mut Ui,
+    pending: &mut Vec<super::Action>,
+) {
+    let mode = store.preferences.mode();
+    let uses_proxy = store.preferences.traffic_mode.uses_proxy();
+    card(ui, Some("线路模式"), |ui| {
+        ui.horizontal(|ui| {
+            let (fg, bg) = if store.active_mode.is_some() {
+                (GOOD, GOOD_DIM)
+            } else {
+                (MUTED, MUTED_DIM)
+            };
+            status_pill(
+                ui,
+                &format!(
+                    "当前生效：{}",
+                    store
+                        .active_mode
+                        .map(|m| m.title().to_string())
+                        .unwrap_or_else(|| "尚未连接".into())
+                ),
+                fg,
+                bg,
+            );
+            status_pill(
+                ui,
+                &format!("已选：{}", mode.title()),
+                ACCENT,
+                ACCENT_DIM,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        uses_proxy
+                            && store.running
+                            && !store.busy
+                            && !store.is_testing_latency
+                            && !store.stopping,
+                        egui::Button::new(RichText::new("按此模式重新选路").size(13.0)),
+                    )
+                    .clicked()
                 {
-                    hint(ui, &format!("下载抽测：{:.2} Mbps", speed.megabits_per_second()));
-                } else {
-                    hint(ui, "下载吞吐：未抽测");
-                }
-                match store
-                    .measurements
-                    .get(&node.id)
-                    .and_then(|m| m.openai_reachable)
-                {
-                    Some(true) => hint(ui, "OpenAI：已验证"),
-                    Some(false) => hint(ui, "OpenAI：本次未确认"),
-                    None => {}
+                    pending.push(super::Action::ApplyMode);
                 }
             });
+        });
+        ui.add_space(6.0);
+        hint(ui, mode.explanation());
+        if !uses_proxy {
+            ui.add_space(2.0);
+            hint(ui, "直连模式下线路选择不生效；切换到规则或全局代理后才会使用节点。");
         }
+        ui.add_space(2.0);
+        hint(ui, "切换线路模式请在概览页操作。");
+        selected_node_details(store, ui);
     });
+}
+
+fn selected_node_details(store: &crate::state::Store, ui: &mut Ui) {
+    if let Some(node) = store
+        .node_list_nodes()
+        .into_iter()
+        .find(|n| n.name == store.selected)
+    {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if let Some(latency) = store.latencies.get(&node.id).and_then(|l| l.milliseconds) {
+                hint(ui, &format!("HTTPS：{latency} ms"));
+            }
+            if let Some(speed) = store
+                .measurements
+                .get(&node.id)
+                .and_then(|m| m.throughput.as_ref())
+            {
+                hint(ui, &format!("下载抽测：{:.2} Mbps", speed.megabits_per_second()));
+            } else {
+                hint(ui, "下载吞吐：未抽测");
+            }
+            match store
+                .measurements
+                .get(&node.id)
+                .and_then(|m| m.openai_reachable)
+            {
+                Some(true) => hint(ui, "OpenAI：已验证"),
+                Some(false) => hint(ui, "OpenAI：本次未确认"),
+                None => {}
+            }
+        });
+    }
 }
 
 pub fn traffic_panel(store: &crate::state::Store, ui: &mut Ui) {
@@ -417,15 +598,15 @@ pub fn traffic_panel(store: &crate::state::Store, ui: &mut Ui) {
             traffic_totals(
                 ui,
                 "本次内核运行累计",
-                &format(data.session_upload),
-                &format(data.session_download),
+                &crate::logic::traffic::format_bytes(data.session_upload),
+                &crate::logic::traffic::format_bytes(data.session_download),
             );
             ui.separator();
             traffic_totals(
                 ui,
                 "历史累计（本应用记录）",
-                &format(data.lifetime_upload),
-                &format(data.lifetime_download),
+                &crate::logic::traffic::format_bytes(data.lifetime_upload),
+                &crate::logic::traffic::format_bytes(data.lifetime_download),
             );
         });
         ui.add_space(8.0);

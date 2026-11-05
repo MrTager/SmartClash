@@ -10,8 +10,19 @@ const SUPPORTED: [&str; 12] = [
     "snell", "anytls",
 ];
 
+pub struct ParseOutcome {
+    pub nodes: Vec<ProxyNode>,
+    pub skipped: usize,
+}
+
 /// 只导入节点定义；远程规则、控制器设置与脚本全部丢弃。
 pub fn parse(text: &str, source: &Source) -> Result<Vec<ProxyNode>, String> {
+    parse_detailed(text, source).map(|outcome| outcome.nodes)
+}
+
+/// 与 `parse` 相同，但保留被跳过节点的数量。
+/// 单个节点不受支持或格式异常时只跳过该节点，不再拒绝整份订阅。
+pub fn parse_detailed(text: &str, source: &Source) -> Result<ParseOutcome, String> {
     if text.len() > MAX_BYTES {
         return Err("订阅超过 10 MB".into());
     }
@@ -31,11 +42,19 @@ pub fn parse(text: &str, source: &Source) -> Result<Vec<ProxyNode>, String> {
     }
 
     let mut nodes = Vec::with_capacity(list.len());
+    let mut skipped = 0usize;
     for item in list {
-        let input = item
-            .as_object()
-            .ok_or("订阅存在格式不正确的节点定义")?;
-        let raw = normalize_transport(input)?;
+        let Some(input) = item.as_object() else {
+            skipped += 1;
+            continue;
+        };
+        let raw = match normalize_transport(input) {
+            Ok(raw) => raw,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
 
         let node_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let server = raw.get("server").and_then(|v| v.as_str()).unwrap_or("");
@@ -47,7 +66,8 @@ pub fn parse(text: &str, source: &Source) -> Result<Vec<ProxyNode>, String> {
             || !(1..=65535).contains(&port)
             || original.is_empty()
         {
-            return Err("订阅存在不支持或缺少 name/type/server/port 的节点".into());
+            skipped += 1;
+            continue;
         }
 
         let mut checked = raw.clone();
@@ -70,12 +90,20 @@ pub fn parse(text: &str, source: &Source) -> Result<Vec<ProxyNode>, String> {
                 checked.remove("plugin");
             }
         }
-        validate(&Value::Object(checked.clone()))?;
+        if validate(&Value::Object(checked.clone())).is_err() {
+            skipped += 1;
+            continue;
+        }
 
         let mut identity = raw.clone();
         identity.remove("name");
-        let canonical = serde_json::to_string(&Value::Object(identity.clone()))
-            .map_err(|_| "节点配置无法序列化")?;
+        let canonical = match serde_json::to_string(&Value::Object(identity.clone())) {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
         let fingerprint = hex_sha256(canonical.as_bytes());
 
         let truncated: String = original.chars().take(70).collect();
@@ -90,7 +118,12 @@ pub fn parse(text: &str, source: &Source) -> Result<Vec<ProxyNode>, String> {
             payload,
         });
     }
-    Ok(nodes)
+    if nodes.is_empty() {
+        return Err(format!(
+            "订阅中没有可用节点（已跳过 {skipped} 个不支持或格式异常的节点）"
+        ));
+    }
+    Ok(ParseOutcome { nodes, skipped })
 }
 
 fn value_as_u64(value: &Value) -> Option<u64> {
@@ -180,4 +213,37 @@ pub fn merge(batches: Vec<Vec<ProxyNode>>) -> Vec<ProxyNode> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> Source {
+        Source {
+            id: "test".into(),
+            name: "test".into(),
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn skips_invalid_nodes_instead_of_rejecting_whole_source() {
+        let text = r#"
+proxies:
+  - name: good
+    type: ss
+    server: example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: secret
+  - name: bad
+    type: unsupported-type
+    server: example.com
+    port: 443
+"#;
+        let outcome = parse_detailed(text, &source()).expect("应保留有效节点");
+        assert_eq!(outcome.nodes.len(), 1);
+        assert_eq!(outcome.skipped, 1);
+    }
 }

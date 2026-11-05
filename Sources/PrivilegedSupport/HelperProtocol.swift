@@ -4,7 +4,7 @@ import ProxyLogic
 
 public enum HelperLocation {
     public static let label = "com.smartclash.helper"
-    public static let version = 1
+    public static let version = 2
     public static let executable = "/Library/PrivilegedHelperTools/com.smartclash.helper"
     public static let directory = "/Library/Application Support/SmartClashHelper"
     public static let manifest = directory + "/installation.plist"
@@ -18,7 +18,7 @@ public enum HelperLocation {
 public protocol PrivilegedXPC {
     func ping(withReply reply: @escaping (Int) -> Void)
     func setSystemProxy(_ snapshots: Data, enabled: Bool, withReply reply: @escaping (String?) -> Void)
-    func startTun(_ configuration: Data, withReply reply: @escaping (String?) -> Void)
+    func startTun(_ configuration: Data, kernel: String, withReply reply: @escaping (String?) -> Void)
     func stopTun(withReply reply: @escaping (String?) -> Void)
 }
 
@@ -29,10 +29,13 @@ public struct HelperInstallation: Codable, Equatable {
     public let clientRequirement: String
     public let helperRequirement: String
     public let coreRequirement: String
-    public init(build: String, ownerUID: UInt32, clientRequirement: String, helperRequirement: String, coreRequirement: String) {
+    // 旧版安装记录没有该字段；nil 表示只有 Mihomo。
+    public let kernelRequirements: [String: String]?
+    public init(build: String, ownerUID: UInt32, clientRequirement: String, helperRequirement: String,
+                coreRequirement: String, kernelRequirements: [String: String]? = nil) {
         version = HelperLocation.version; self.build = build; self.ownerUID = ownerUID
         self.clientRequirement = clientRequirement; self.helperRequirement = helperRequirement
-        self.coreRequirement = coreRequirement
+        self.coreRequirement = coreRequirement; self.kernelRequirements = kernelRequirements
     }
 }
 

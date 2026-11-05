@@ -1,12 +1,21 @@
 .build/
 .swiftpm/
 dist/
+.writing/
 Resources/mihomo
+Resources/sing-box
+Resources/xray
+Resources/geoip.dat
+Resources/geosite.dat
 Resources/core-release.json
 .DS_Store
 windows/target/
 windows/.linker/
 windows/resources/mihomo.exe
+windows/resources/sing-box.exe
+windows/resources/xray.exe
+windows/resources/geoip.dat
+windows/resources/geosite.dat
 
 # Local credentials and runtime data must never be published.
 .env

@@ -60,7 +60,7 @@ pub fn draw(
         });
     }
 
-    widgets::routing_controls(store, ui, pending);
+    widgets::routing_summary(store, ui, pending);
 
     widgets::card(ui, Some("当前实际生效路径"), |ui| {
         if store.active_trace.hops.is_empty() {
@@ -137,10 +137,7 @@ pub fn draw(
         store.preferences.explore_multihop = Some(explore);
         store.save_preferences();
     }
-    hint(
-        ui,
-        "图中路径来自当前选中节点及实际 dialer-proxy 引用，不以动画假装连接。后台守护不会锁住页面；已有 TCP 连接在出口切换时仍可能需要重连。",
-    );
+    hint(ui, "出口切换时，已有 TCP 连接可能需要重连。");
 }
 
 fn arrow(ui: &mut Ui) {

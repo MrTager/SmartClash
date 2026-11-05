@@ -1,5 +1,6 @@
 use super::widgets::{self, hint, MUTED, TEXT};
 use super::{Action, ViewState};
+use crate::logic::model::AGGREGATE_PORT;
 use crate::state::Store;
 use egui::{Color32, RichText, Ui};
 
@@ -12,7 +13,7 @@ pub fn draw(
     widgets::page_title(
         ui,
         "多个订阅，一个入口",
-        "导入 Clash YAML / JSON 订阅，按节点配置去重。更新失败保留缓存。普通模式每小时更新，TUN 模式请停止后手动更新。",
+        "导入 Clash YAML / JSON 订阅，按节点配置去重。更新失败保留缓存。订阅需手动更新；TUN 模式请停止后更新。",
     );
 
     widgets::card(ui, Some("添加订阅"), |ui| {
@@ -98,7 +99,7 @@ pub fn draw(
             ui.label(
                 RichText::new(if store.subscription_ready {
                     format!(
-                        "http://127.0.0.1:17892/{}…/config.yaml",
+                        "http://127.0.0.1:{AGGREGATE_PORT}/{}…/config.yaml",
                         &store.preferences.subscription_token[..6.min(store.preferences.subscription_token.len())]
                     )
                 } else {
@@ -125,25 +126,5 @@ pub fn draw(
             ui,
             "链接仅当前 Windows 本机可访问，客户端需保持本应用运行。导出内容含节点密码，请妥善保管。其他客户端应选择“直连”更新本机订阅。",
         );
-    });
-
-    widgets::card(ui, Some("当前状态"), |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let dim = widgets::MUTED_DIM;
-            widgets::status_pill(ui, &format!("去重节点 {} 个", store.nodes.len()), widgets::TEXT, dim);
-            widgets::status_pill(ui, &format!("订阅来源 {} 个", store.preferences.sources.len()), widgets::TEXT, dim);
-            widgets::status_pill(
-                ui,
-                &format!("系统代理：{}", if store.system_proxy { "已开启" } else { "已关闭" }),
-                if store.system_proxy { widgets::GOOD } else { MUTED },
-                if store.system_proxy { widgets::GOOD_DIM } else { dim },
-            );
-            widgets::status_pill(
-                ui,
-                &format!("内核：{}", if store.running { "运行中" } else { "已停止" }),
-                if store.running { widgets::GOOD } else { MUTED },
-                if store.running { widgets::GOOD_DIM } else { dim },
-            );
-        });
     });
 }

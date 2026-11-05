@@ -7,6 +7,8 @@ struct Preferences: Codable {
     var exploreMultihop: Bool? = false
     var routingMode: RoutingMode? = .lowLatency
     var trafficMode: TrafficMode? = .rule
+    // 旧版偏好文件没有该字段时按 Mihomo 处理。
+    var kernel: KernelKind? = .mihomo
     var chain: ChainOptions? = nil
     var secret: String = UUID().uuidString + UUID().uuidString
     var subscriptionToken: String = UUID().uuidString

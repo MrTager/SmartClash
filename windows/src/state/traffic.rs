@@ -1,3 +1,5 @@
+use crate::logic::health::now_ms;
+use crate::logic::kernel::KernelKind;
 use crate::logic::traffic::{TrafficLedger, TrafficSample};
 use crate::services::core_client::CoreClient;
 use crate::services::paths;
@@ -87,6 +89,10 @@ pub fn start(client: CoreClient, data: Arc<Mutex<TrafficData>>, stop: Arc<Atomic
         guard.points.clear();
         guard.connected = false;
     }
+    if client.kind == KernelKind::Xray {
+        std::thread::spawn(move || poll_xray(client, data, stop, run_id));
+        return;
+    }
     std::thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             let Ok(mut child) = client.traffic_stream() else {
@@ -129,4 +135,60 @@ pub fn start(client: CoreClient, data: Arc<Mutex<TrafficData>>, stop: Arc<Atomic
             guard.download_rate = 0;
         }
     });
+}
+
+/// Xray 没有流量事件流：每秒查询一次 StatsService，按累计值差分得到速率。
+fn poll_xray(
+    client: CoreClient,
+    data: Arc<Mutex<TrafficData>>,
+    stop: Arc<AtomicBool>,
+    run_id: String,
+) {
+    let mut previous: Option<(u64, u64, u64)> = None;
+    while !stop.load(Ordering::SeqCst) {
+        match client.traffic_totals() {
+            Ok((up, down)) => {
+                let now = now_ms();
+                let (up_rate, down_rate) = match previous {
+                    Some((last_time, last_up, last_down)) if now > last_time => {
+                        let seconds = (now - last_time) as f64 / 1000.0;
+                        let up_delta = up.saturating_sub(last_up) as f64;
+                        let down_delta = down.saturating_sub(last_down) as f64;
+                        (
+                            (up_delta / seconds) as u64,
+                            (down_delta / seconds) as u64,
+                        )
+                    }
+                    _ => (0, 0),
+                };
+                previous = Some((now, up, down));
+                if let Ok(mut guard) = data.lock() {
+                    guard.ingest(
+                        TrafficSample {
+                            up: up_rate,
+                            down: down_rate,
+                            up_total: Some(up),
+                            down_total: Some(down),
+                        },
+                        &run_id,
+                    );
+                }
+            }
+            Err(_) => {
+                if let Ok(mut guard) = data.lock() {
+                    guard.connected = false;
+                    guard.upload_rate = 0;
+                    guard.download_rate = 0;
+                }
+                previous = None;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    if let Ok(mut guard) = data.lock() {
+        guard.save();
+        guard.connected = false;
+        guard.upload_rate = 0;
+        guard.download_rate = 0;
+    }
 }

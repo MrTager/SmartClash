@@ -1,3 +1,4 @@
+use crate::logic::kernel::{KernelKind, XRAY_API_PORT, XRAY_SOCKS_PORT};
 use crate::services::core_client::CoreClient;
 use crate::services::{command, paths};
 use std::net::TcpListener;
@@ -15,10 +16,11 @@ pub struct CoreProcess {
     config_path: PathBuf,
     pid_path: PathBuf,
     exe: PathBuf,
+    kind: KernelKind,
 }
 
 impl CoreProcess {
-    pub fn new() -> Self {
+    pub fn new(kind: KernelKind) -> Self {
         let root = paths::data_root();
         Self {
             child: None,
@@ -26,8 +28,19 @@ impl CoreProcess {
             config_path: root.join("config.json"),
             pid_path: root.join("core.pid"),
             root,
-            exe: paths::core_binary(),
+            exe: paths::core_binary(kind),
+            kind,
         }
+    }
+
+    /// 用户切换内核后，重启进程时使用新的可执行文件。
+    pub fn set_kind(&mut self, kind: KernelKind) {
+        self.kind = kind;
+        self.exe = paths::core_binary(kind);
+    }
+
+    pub fn kind(&self) -> KernelKind {
+        self.kind
     }
 
     pub fn executable(&self) -> PathBuf {
@@ -48,12 +61,28 @@ impl CoreProcess {
         }
         if !self.exe.exists() {
             return Err(format!(
-                "缺少 Mihomo 内核：{}，请重新安装完整安装包",
+                "缺少 {} 内核：{}，请重新安装完整安装包",
+                self.kind.title(),
                 self.exe.display()
             ));
         }
+        if tun && !self.kind.capabilities().tun {
+            return Err(format!("{} 内核不支持 TUN，请改用 Mihomo 或 sing-box", self.kind.title()));
+        }
         // 拒绝接入其他程序占用的控制器或代理端口。
-        for port in [crate::logic::model::CONTROLLER_PORT, crate::logic::model::PROXY_PORT, crate::logic::model::PROBE_PORT] {
+        let ports: &[u16] = match self.kind {
+            KernelKind::Mihomo | KernelKind::SingBox => &[
+                crate::logic::model::CONTROLLER_PORT,
+                crate::logic::model::PROXY_PORT,
+                crate::logic::model::PROBE_PORT,
+            ],
+            KernelKind::Xray => &[
+                crate::logic::model::PROXY_PORT,
+                XRAY_SOCKS_PORT,
+                XRAY_API_PORT,
+            ],
+        };
+        for &port in ports {
             if port_in_use(port) {
                 return Err(format!("端口 {port} 已占用，请关闭冲突的代理程序"));
             }
@@ -63,17 +92,7 @@ impl CoreProcess {
         }
 
         paths::write_private(&self.config_path, data)?;
-        let test = command::run(
-            &self.exe,
-            &[
-                "-t".into(),
-                "-d".into(),
-                self.root.display().to_string(),
-                "-f".into(),
-                self.config_path.display().to_string(),
-            ],
-        )
-        .map_err(|e| format!("无法启动内核校验：{e}"))?;
+        let test = self.run_check()?;
         paths::write_private(&self.root.join("core-test.log"), test.text.as_bytes())?;
         if test.code != 0 {
             return Err("内核配置校验失败，请检查订阅节点格式（详情见 core-test.log）".into());
@@ -105,23 +124,89 @@ impl CoreProcess {
         Err("内核启动超时，请检查 core.log".into())
     }
 
+    /// 按内核类型执行配置校验。
+    fn run_check(&self) -> Result<command::CmdOutput, String> {
+        let args: Vec<String> = match self.kind {
+            KernelKind::Mihomo => vec![
+                "-t".into(),
+                "-d".into(),
+                self.root.display().to_string(),
+                "-f".into(),
+                self.config_path.display().to_string(),
+            ],
+            KernelKind::SingBox => vec![
+                "check".into(),
+                "-c".into(),
+                self.config_path.display().to_string(),
+                "-D".into(),
+                self.root.display().to_string(),
+            ],
+            KernelKind::Xray => vec![
+                "run".into(),
+                "-test".into(),
+                "-c".into(),
+                self.config_path.display().to_string(),
+            ],
+        };
+        let mut cmd = Command::new(&self.exe);
+        cmd.args(&args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null());
+        if self.kind == KernelKind::Xray {
+            cmd.env("XRAY_LOCATION_ASSET", paths::asset_dir());
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| format!("无法启动内核校验：{e}"))?;
+        Ok(command::CmdOutput {
+            code: output.status.code().unwrap_or(-1),
+            text: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+
+    fn launch_args(&self) -> Vec<String> {
+        match self.kind {
+            KernelKind::Mihomo => vec![
+                "-d".into(),
+                self.root.display().to_string(),
+                "-f".into(),
+                self.config_path.display().to_string(),
+            ],
+            KernelKind::SingBox => vec![
+                "run".into(),
+                "-c".into(),
+                self.config_path.display().to_string(),
+                "-D".into(),
+                self.root.display().to_string(),
+            ],
+            KernelKind::Xray => vec![
+                "run".into(),
+                "-c".into(),
+                self.config_path.display().to_string(),
+            ],
+        }
+    }
+
+    fn apply_launch_env(&self, cmd: &mut Command) {
+        if self.kind == KernelKind::Xray {
+            cmd.env("XRAY_LOCATION_ASSET", paths::asset_dir());
+        }
+    }
+
     fn start_child(&mut self) -> Result<(), String> {
         let log_path = self.root.join("core.log");
         let log = std::fs::File::create(&log_path).map_err(|e| format!("无法创建内核日志：{e}"))?;
         let err = log.try_clone().map_err(|e| format!("无法创建内核日志：{e}"))?;
-        let child = Command::new(&self.exe)
-            .args([
-                "-d",
-                &self.root.display().to_string(),
-                "-f",
-                &self.config_path.display().to_string(),
-            ])
+        let mut cmd = Command::new(&self.exe);
+        cmd.args(self.launch_args())
+            .current_dir(&self.root)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
-            .stderr(Stdio::from(err))
-            .spawn()
-            .map_err(|e| format!("无法启动内核：{e}"))?;
+            .stderr(Stdio::from(err));
+        self.apply_launch_env(&mut cmd);
+        let child = cmd.spawn().map_err(|e| format!("无法启动内核：{e}"))?;
         paths::write_private(&self.pid_path, child.id().to_string().as_bytes())?;
         self.child = Some(child);
         Ok(())
@@ -133,24 +218,25 @@ impl CoreProcess {
         let log = self.root.join("core.log");
         let err_log = self.root.join("core.err.log");
         let script = helper_script_path();
+        let args = self
+            .launch_args()
+            .iter()
+            .map(|arg| command::ps_quote(arg))
+            .collect::<Vec<_>>()
+            .join(",");
         let content = format!(
             "$ErrorActionPreference = 'Stop'\n\
-             $p = Start-Process -FilePath {} -ArgumentList @('-d',{},'-f',{}) -WorkingDirectory {} -WindowStyle Hidden -RedirectStandardOutput {} -RedirectStandardError {} -PassThru\n\
+             schtasks.exe /Delete /TN 'SmartClashTunHelper' /F 2>$null | Out-Null\n\
+             $p = Start-Process -FilePath {} -ArgumentList @({}) -WorkingDirectory {} -WindowStyle Hidden -RedirectStandardOutput {} -RedirectStandardError {} -PassThru\n\
              Set-Content -LiteralPath {} -Value $p.Id -Encoding ascii\n",
             command::ps_quote(&self.exe.display().to_string()),
-            command::ps_quote(&self.root.display().to_string()),
-            command::ps_quote(&self.config_path.display().to_string()),
+            args,
             command::ps_quote(&self.root.display().to_string()),
             command::ps_quote(&log.display().to_string()),
             command::ps_quote(&err_log.display().to_string()),
             command::ps_quote(&pid_file.display().to_string())
         );
         paths::write_private(&script, content.as_bytes())?;
-        // 首次使用：创建提权计划任务（仅此一次需要 UAC 确认）。
-        // 创建失败不阻塞，退回每次确认的旧模式。
-        if let Err(error) = ensure_helper_task() {
-            eprintln!("helper task unavailable: {error}");
-        }
         elevate_helper_script()?;
 
         // 等待提权脚本写入 PID；授权被取消或任务执行失败时不会产生 PID。
@@ -174,7 +260,7 @@ impl CoreProcess {
             let _ = child.wait();
         }
         if let Some(pid) = self.tun_pid.take() {
-            if process_alive(pid) {
+            if process_owned(pid) {
                 attempted_tun_kill = true;
                 if let Err(e) = stop_elevated(pid) {
                     errors.push(e);
@@ -189,8 +275,7 @@ impl CoreProcess {
                 .and_then(|text| text.trim().parse::<u32>().ok());
             match orphan {
                 Some(pid)
-                    if process_alive(pid)
-                        && process_image(pid).eq_ignore_ascii_case("mihomo.exe") =>
+                    if process_owned(pid) =>
                 {
                     if let Err(e) = stop_elevated(pid) {
                         errors.push(e);
@@ -206,7 +291,7 @@ impl CoreProcess {
             if let Some(text) = std::fs::read_to_string(&self.pid_path).ok() {
                 if let Ok(pid) = text.trim().parse::<u32>() {
                     // 只终止可确认是本应用内核路径的遗留进程。
-                    if process_alive(pid) && process_image(pid).eq_ignore_ascii_case("mihomo.exe") {
+                    if process_owned(pid) {
                         if let Err(e) = stop_elevated(pid) {
                             errors.push(e);
                         }
@@ -225,12 +310,69 @@ impl CoreProcess {
 
 impl Default for CoreProcess {
     fn default() -> Self {
-        Self::new()
+        Self::new(KernelKind::Mihomo)
     }
 }
 
 fn port_in_use(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// 用对应内核校验一段配置，不启动常驻进程。
+pub fn validate(kind: KernelKind, data: &[u8]) -> Result<(), String> {
+    let exe = paths::core_binary(kind);
+    if !exe.exists() {
+        return Err(format!("缺少 {} 内核", kind.title()));
+    }
+    let root = paths::data_root();
+    let dir = root.join(format!("config-check-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建校验目录：{e}"))?;
+    let path = dir.join("config.json");
+    paths::write_private(&path, data)?;
+    let args: Vec<String> = match kind {
+        KernelKind::Mihomo => vec![
+            "-t".into(),
+            "-d".into(),
+            dir.display().to_string(),
+            "-f".into(),
+            path.display().to_string(),
+        ],
+        KernelKind::SingBox => vec![
+            "check".into(),
+            "-c".into(),
+            path.display().to_string(),
+            "-D".into(),
+            dir.display().to_string(),
+        ],
+        KernelKind::Xray => vec![
+            "run".into(),
+            "-test".into(),
+            "-c".into(),
+            path.display().to_string(),
+        ],
+    };
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null());
+    if kind == KernelKind::Xray {
+        cmd.env("XRAY_LOCATION_ASSET", paths::asset_dir());
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("无法启动内核校验：{e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = paths::write_private(&root.join("core-test.log"), text.as_bytes());
+    let _ = std::fs::remove_dir_all(&dir);
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("内核配置校验失败，请检查订阅节点格式（详情见 core-test.log）".into())
+    }
 }
 
 pub fn process_alive(pid: u32) -> bool {
@@ -245,32 +387,58 @@ pub fn process_alive(pid: u32) -> bool {
         ],
     );
     match result {
-        Ok(output) => output.text.to_lowercase().contains("\"mihomo.exe\""),
+        Ok(output) => {
+            let text = output.text.to_lowercase();
+            KernelKind::ALL
+                .iter()
+                .any(|kind| text.contains(&format!("\"{}\"", kind.binary_name())))
+        }
         Err(_) => false,
     }
 }
 
-fn process_image(pid: u32) -> String {
-    let result = command::run(
-        Path::new("tasklist.exe"),
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    let output = command::run(
+        Path::new("powershell.exe"),
         &[
-            "/FI".into(),
-            format!("PID eq {pid}"),
-            "/FO".into(),
-            "CSV".into(),
-            "/NH".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ExecutablePath"),
         ],
-    );
-    let Ok(output) = result else {
-        return String::new();
-    };
-    output
-        .text
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim_matches('"')
-        .to_string()
+    )
+    .ok()?;
+    let text = output.text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(text))
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    fn normalize(path: &Path) -> String {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_lowercase()
+    }
+    normalize(left) == normalize(right)
+}
+
+/// 仅当 PID 仍存活且可执行文件就是本应用自带的任一内核时才认为归属本应用，
+/// 避免 PID 复用后误杀其他代理客户端；允许任一内核是为了能在切换内核后清理遗留进程。
+fn process_owned(pid: u32) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    process_executable(pid)
+        .map(|actual| {
+            KernelKind::ALL
+                .iter()
+                .any(|kind| same_path(&actual, &paths::core_binary(*kind)))
+        })
+        .unwrap_or(false)
 }
 
 fn run_elevated(script: &Path) -> Result<(), String> {
@@ -311,6 +479,7 @@ fn stop_elevated(pid: u32) -> Result<(), String> {
     let script = helper_script_path();
     let content = format!(
         "$ErrorActionPreference = 'SilentlyContinue'\n\
+         schtasks.exe /Delete /TN 'SmartClashTunHelper' /F 2>$null | Out-Null\n\
          Stop-Process -Id {pid} -Force\n\
          Remove-Item -LiteralPath {} -Force\n",
         command::ps_quote(&pid_file.display().to_string())
@@ -326,96 +495,21 @@ fn stop_elevated(pid: u32) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    Err(format!("内核进程 {pid} 仍在运行（提权任务未生效），TUN 可能仍接管网络"))
+    Err(format!("内核进程 {pid} 仍在运行（提权未完成或授权被取消），TUN 可能仍接管网络"))
 }
 
-// ---- 提权计划任务：一次授权，长期免确认 --------------------------------------
+// ---- 提权：每次都经过 UAC ------------------------------------------------
 //
-// 首次启用 TUN 时以管理员身份注册一个「无触发器」的计划任务
-// （因此永远不会自行运行，只能由本应用通过 schtasks /Run 手动启动），
-// 任务以当前用户最高权限运行 wscript（GUI 子系统，无窗口闪烁），
-// 再由 vbs 隐藏执行应用改写的 tun-elevated.ps1。
-// 之后启动 / 停止 / 恢复网络都不再需要 UAC 确认。
-
-const TASK_NAME: &str = "SmartClashTunHelper";
+// 不再注册长期提权计划任务：任务会执行用户可写目录中的脚本与内核，
+// 任何本地进程都能替换后被管理员执行。现在每次启动 / 停止 TUN 都通过
+// Start-Process -Verb RunAs，由用户确认 UAC；脚本内容里顺带清理旧任务。
 
 /// 提权脚本统一落点：每次操作前由应用改写内容（启动或停止）。
 fn helper_script_path() -> PathBuf {
     paths::data_root().join("tun-elevated.ps1")
 }
 
-fn task_exists() -> bool {
-    command::run(
-        Path::new("schtasks.exe"),
-        &["/Query".into(), "/TN".into(), TASK_NAME.into()],
-    )
-    .map(|output| output.code == 0)
-    .unwrap_or(false)
-}
-
-fn write_helper_vbs() -> Result<(), String> {
-    let vbs = paths::data_root().join("tun-elevate.vbs");
-    let script = helper_script_path().display().to_string();
-    let content = format!(
-        "Set sh = CreateObject(\"WScript.Shell\")\r\n\
-         sh.Run \"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"{script}\"\"\", 0, False\r\n"
-    );
-    paths::write_private(&vbs, content.as_bytes())
-}
-
-fn run_helper_task() -> Result<(), String> {
-    let output = command::run(
-        Path::new("schtasks.exe"),
-        &["/Run".into(), "/TN".into(), TASK_NAME.into()],
-    )
-    .map_err(|e| format!("无法启动提权任务：{e}"))?;
-    if output.code == 0 {
-        Ok(())
-    } else {
-        Err(format!("提权任务启动失败：{}", output.text.trim()))
-    }
-}
-
-/// 注册提权计划任务（需要一次 UAC 确认）。无触发器 + 允许并行实例
-/// （避免上一次实例尚未结束时忽略新的启动请求）。
-fn ensure_helper_task() -> Result<(), String> {
-    if task_exists() {
-        return Ok(());
-    }
-    write_helper_vbs()?;
-    let setup = paths::data_root().join("setup-tun-task.ps1");
-    let vbs_argument = format!(
-        "\"{}\"",
-        paths::data_root().join("tun-elevate.vbs").display()
-    );
-    let content = format!(
-        "$ErrorActionPreference = 'Stop'\n\
-         $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument {}\n\
-         $settings = New-ScheduledTaskSettingsSet -MultipleInstances Parallel\n\
-         Register-ScheduledTask -TaskName '{}' -Action $action -Settings $settings -RunLevel Highest -Force | Out-Null\n",
-        command::ps_quote(&vbs_argument),
-        TASK_NAME
-    );
-    paths::write_private(&setup, content.as_bytes())?;
-    run_elevated(&setup)?;
-    for _ in 0..40 {
-        if task_exists() {
-            // 任务已注册成功，脚本内容已执行完毕，可以清理。
-            let _ = std::fs::remove_file(&setup);
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    Err("提权计划任务创建失败（可能取消了管理员授权）".into())
-}
-
-/// 以最高权限执行 helper_script_path() 指向的脚本：
-/// 优先走计划任务（无 UAC 弹窗），任务不可用时回退传统提权（每次弹 UAC）。
+/// 以最高权限执行 helper_script_path() 指向的脚本（每次弹 UAC）。
 fn elevate_helper_script() -> Result<(), String> {
-    if task_exists() {
-        let _ = write_helper_vbs();
-        run_helper_task()
-    } else {
-        run_elevated(&helper_script_path())
-    }
+    run_elevated(&helper_script_path())
 }

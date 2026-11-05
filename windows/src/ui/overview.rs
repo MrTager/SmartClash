@@ -1,7 +1,7 @@
 use super::widgets::{self, hint};
 use super::{Action, ViewState};
 use crate::state::Store;
-use egui::{Color32, Margin, RichText, Rounding, Stroke, Ui};
+use egui::{Margin, RichText, Rounding, Stroke, Ui};
 
 pub fn draw(
     view: &mut ViewState,
@@ -20,8 +20,6 @@ pub fn draw(
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("让连接持续在线").size(24.0).strong().color(widgets::TEXT));
-                    ui.add_space(4.0);
-                    hint(ui, "聚合节点，监测 OpenAI API，自动寻找可用出口。");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -124,6 +122,9 @@ pub fn draw(
     });
     ui.add_space(6.0);
 
+    widgets::kernel_controls(store, ui, pending);
+    ui.add_space(2.0);
+
     widgets::traffic_mode_controls(store, ui, pending);
     ui.add_space(2.0);
 
@@ -131,10 +132,10 @@ pub fn draw(
 
     widgets::routing_controls(store, ui, pending);
     ui.add_space(4.0);
-    widgets::traffic_panel(store, ui);
-    ui.add_space(4.0);
 
     widgets::card(ui, Some("代理控制"), |ui| {
+        hint(ui, "系统代理与 TUN 可以同时开启，分别开关互不影响。");
+        ui.add_space(8.0);
         let can_toggle = !store.busy && !store.recovery && !store.stopping;
         if widgets::toggle_row(
             ui,
@@ -150,14 +151,19 @@ pub fn draw(
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
+        let tun_supported = store.preferences.kernel.capabilities().tun;
         if widgets::toggle_row(
             ui,
             "TUN 虚拟网卡",
-            "接管更多应用流量；首次开启需一次管理员授权，之后免确认。",
+            if tun_supported {
+                "接管更多应用流量；开启和关闭都需要管理员授权（每次弹 UAC）。"
+            } else {
+                "当前内核不支持 TUN；请切换到 Mihomo 或 sing-box。"
+            },
             store.tun,
             "一键开启 TUN",
             "关闭 TUN",
-            can_toggle,
+            can_toggle && tun_supported,
         ) {
             pending.push(Action::ToggleTun);
         }
@@ -238,11 +244,6 @@ pub fn draw(
             "未使用 API Key：检测仅确认 OpenAI API 的访问结果，不保证 ChatGPT 网页登录、验证码或账号可用性。切换影响新连接，已有请求可能需要重试。",
         );
     });
-
-    if let Some(recent) = store.logs.first() {
-        ui.add_space(2.0);
-        hint(ui, recent);
-    }
 }
 
 fn interval_text(value: u64) -> String {

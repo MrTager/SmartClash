@@ -21,13 +21,14 @@ function Find-Cargo {
 $Cargo = Find-Cargo
 Write-Host "使用 cargo: $Cargo"
 
-foreach ($file in @("mihomo.exe", "wintun.dll")) {
+$Kernels = @("mihomo.exe", "sing-box.exe", "xray.exe", "geoip.dat", "geosite.dat")
+foreach ($file in ($Kernels + @("wintun.dll"))) {
     $path = Join-Path $Root "resources\$file"
     if (-not (Test-Path $path)) {
-        if ($file -eq "mihomo.exe") {
-            throw "缺少 resources\mihomo.exe。内核不入库，请先运行 .\fetch-core.ps1 下载，或用 -Source 指定本地内核。"
+        if ($Kernels -contains $file) {
+            throw "缺少 resources\$file。内核与 geo 数据不入库，请先运行 .\fetch-core.ps1 下载（可用 -Source 系列参数指定本地文件）。"
         }
-        throw "缺少资源文件 resources\$file，请先放入内核与 wintun.dll。"
+        throw "缺少资源文件 resources\$file，请先放入 wintun.dll。"
     }
 }
 
@@ -40,8 +41,9 @@ if (-not (Test-Path $exe)) { throw "未生成 SmartClash.exe。" }
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
 New-Item -ItemType Directory -Path (Join-Path $Dist "resources") -Force | Out-Null
 Copy-Item $exe (Join-Path $Dist "SmartClash.exe")
-Copy-Item (Join-Path $Root "resources\mihomo.exe") (Join-Path $Dist "resources\mihomo.exe")
-Copy-Item (Join-Path $Root "resources\wintun.dll") (Join-Path $Dist "resources\wintun.dll")
+foreach ($file in ($Kernels + @("wintun.dll"))) {
+    Copy-Item (Join-Path $Root "resources\$file") (Join-Path $Dist "resources\$file")
+}
 Copy-Item (Join-Path $Root "README.md") (Join-Path $Dist "README.md")
 Copy-Item (Join-Path $Root "..\LICENSE") (Join-Path $Dist "LICENSE")
 Copy-Item (Join-Path $Root "..\THIRD_PARTY_NOTICES.md") (Join-Path $Dist "THIRD_PARTY_NOTICES.md")

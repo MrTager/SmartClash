@@ -18,7 +18,8 @@ private final class CancellableCommand: @unchecked Sendable {
     }
 }
 enum Command {
-    static func run(_ executable: String, _ args: [String], cancellable: Bool = false) async throws -> CommandResult {
+    static func run(_ executable: String, _ args: [String], cancellable: Bool = false,
+                    environment extra: [String: String]? = nil) async throws -> CommandResult {
         let command = CancellableCommand()
         return try await withTaskCancellationHandler {
             if cancellable { try Task.checkCancellation() }
@@ -26,7 +27,9 @@ enum Command {
             let p = Process(); p.executableURL = URL(fileURLWithPath: executable); p.arguments = args
             let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
             var environment = ProcessInfo.processInfo.environment
-            environment["LC_ALL"] = "C"; p.environment = environment
+            environment["LC_ALL"] = "C"
+            if let extra { environment.merge(extra, uniquingKeysWith: { _, new in new }) }
+            p.environment = environment
             try command.launch(p)
             let bytes = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()

@@ -33,7 +33,11 @@ final class PrivilegedClient {
     private var installation: HelperInstallation?
     private var preparation: Task<Void, Error>?
     private var helperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Library/HelperTools/SmartClashHelper") }
-    private var coreURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/mihomo") }
+    private var resources: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources") }
+    private var coreURLs: [(String, URL)] {
+        ["mihomo", "sing-box"].map { ($0, resources.appendingPathComponent($0)) }
+            .filter { FileManager.default.isExecutableFile(atPath: $0.1.path) }
+    }
 
     func prepare() async throws {
         if let preparation { return try await preparation.value }
@@ -47,11 +51,11 @@ final class PrivilegedClient {
         try await prepare()
         try await operation { $0.setSystemProxy(snapshots, enabled: enabled, withReply: $1) }
     }
-    func startTun(_ configuration: Data) async throws {
-        try TunConfiguration.validate(configuration)
+    func startTun(_ configuration: Data, kernel: KernelKind) async throws {
+        try TunConfiguration.validate(configuration, kernel: kernel)
         try await prepare()
         try Task.checkCancellation()
-        try await operation { $0.startTun(configuration, withReply: $1) }
+        try await operation { $0.startTun(configuration, kernel: kernel.rawValue, withReply: $1) }
     }
     func stopTun() async throws {
         try await prepare()
@@ -59,9 +63,17 @@ final class PrivilegedClient {
     }
     private func identity() throws -> HelperInstallation {
         if let installation { return installation }
+        var requirements: [String: String] = [:]
+        for (name, url) in coreURLs {
+            requirements[name] = try CodeIdentity.requirement(at: url)
+        }
+        guard let core = requirements["mihomo"] ?? requirements["sing-box"] else {
+            throw ProxyError.message("安装包缺少代理内核，请先运行 script/fetch_core.sh 并重新构建")
+        }
         let value = try HelperInstallation(build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "development",
             ownerUID: getuid(), clientRequirement: CodeIdentity.requirement(at: Bundle.main.bundleURL),
-            helperRequirement: CodeIdentity.requirement(at: helperURL), coreRequirement: CodeIdentity.requirement(at: coreURL))
+            helperRequirement: CodeIdentity.requirement(at: helperURL), coreRequirement: core,
+            kernelRequirements: requirements)
         installation = value; return value
     }
     private func ensureAvailable() async throws {
@@ -101,6 +113,18 @@ final class PrivilegedClient {
             "ProcessType": "Interactive", "Umask": 0o077]
         let stagedPlist = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).base64EncodedString()
         let q = Command.quote
+        var kernelInstalls: [String] = []
+        var kernelVerifies: [String] = []
+        var kernelMoves: [String] = []
+        for (name, url) in coreURLs {
+            let staged = HelperLocation.directory + "/" + name + ".new"
+            kernelInstalls.append("/usr/bin/install -o root -g wheel -m 755 \(q(url.path)) \(q(staged))")
+            if let requirement = installation.kernelRequirements?[name] {
+                kernelVerifies.append("/usr/bin/codesign --verify --strict -R \(q(CodeIdentity.commandLineRequirement(requirement))) \(q(staged))")
+            }
+            kernelMoves.append("/bin/mv -f \(q(staged)) \(q(HelperLocation.directory + "/" + name))")
+        }
+        guard !kernelInstalls.isEmpty else { throw ProxyError.message("安装包缺少代理内核，请先运行 script/fetch_core.sh") }
         // Administrator consent is used only to install/update root-owned, signed code.
         // Subsequent operations use a small, authenticated XPC interface; no shell is exposed over XPC.
         let script = """
@@ -108,12 +132,12 @@ final class PrivilegedClient {
         umask 077
         /usr/bin/install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools \(q(HelperLocation.directory))
         /usr/bin/install -o root -g wheel -m 755 \(q(helperURL.path)) \(q(HelperLocation.executable + ".new"))
-        /usr/bin/install -o root -g wheel -m 755 \(q(coreURL.path)) \(q(HelperLocation.directory + "/mihomo.new"))
+        \(kernelInstalls.joined(separator: "\n"))
         /usr/bin/codesign --verify --strict -R \(q(CodeIdentity.commandLineRequirement(installation.helperRequirement))) \(q(HelperLocation.executable + ".new"))
-        /usr/bin/codesign --verify --strict -R \(q(CodeIdentity.commandLineRequirement(installation.coreRequirement))) \(q(HelperLocation.directory + "/mihomo.new"))
+        \(kernelVerifies.joined(separator: "\n"))
         if /bin/launchctl print system/\(HelperLocation.label) >/dev/null 2>&1; then /bin/launchctl bootout system/\(HelperLocation.label); fi
         /bin/mv -f \(q(HelperLocation.executable + ".new")) \(q(HelperLocation.executable))
-        /bin/mv -f \(q(HelperLocation.directory + "/mihomo.new")) \(q(HelperLocation.directory + "/mihomo"))
+        \(kernelMoves.joined(separator: "\n"))
         /usr/bin/printf '%s' \(q(manifest)) | /usr/bin/base64 -D > \(q(HelperLocation.manifest + ".new"))
         /usr/bin/printf '%s' \(q(stagedPlist)) | /usr/bin/base64 -D > \(q(HelperLocation.plist + ".new"))
         /usr/sbin/chown root:wheel \(q(HelperLocation.manifest + ".new")) \(q(HelperLocation.plist + ".new"))

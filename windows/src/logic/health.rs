@@ -44,6 +44,9 @@ impl HealthPolicy {
             "unsupported country",
             "region is not supported",
             "country is not supported",
+            "country, region, or territory not supported",
+            "not available in your country",
+            "not supported in your region",
         ];
         let parsed: Option<Value> = serde_json::from_str(body).ok();
 
@@ -114,5 +117,38 @@ pub struct StandbyPolicy;
 impl StandbyPolicy {
     pub fn usable(result: &ProbeResult, checked: u64, now: u64, ttl_ms: u64) -> bool {
         result.health == Health::Healthy && now >= checked && now - checked <= ttl_ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HealthPolicy;
+    use crate::logic::model::Health;
+
+    #[test]
+    fn openai_region_error_is_blocked_even_without_error_code() {
+        let body = r#"{"error":{"message":"Country, region, or territory not supported"}}"#;
+        let result = HealthPolicy::classify(403, body, 120);
+        assert_eq!(result.health, Health::Blocked);
+    }
+
+    #[test]
+    fn openai_region_error_with_code_is_blocked() {
+        let body = r#"{"error":{"message":"Country, region, or territory not supported","code":"unsupported_country"}}"#;
+        let result = HealthPolicy::classify(403, body, 120);
+        assert_eq!(result.health, Health::Blocked);
+    }
+
+    #[test]
+    fn missing_api_key_still_proves_endpoint_reachable() {
+        let body = r#"{"error":{"message":"You didn't provide an API key","type":"invalid_request_error"}}"#;
+        let result = HealthPolicy::classify(401, body, 90);
+        assert_eq!(result.health, Health::Healthy);
+    }
+
+    #[test]
+    fn rate_limit_is_not_a_failure() {
+        let result = HealthPolicy::classify(429, r#"{"error":{"message":"rate limit"}}"#, 50);
+        assert_eq!(result.health, Health::Limited);
     }
 }

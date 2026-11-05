@@ -129,32 +129,57 @@ impl SystemProxy {
 
         key.set_value("ProxyEnable", &snapshot.proxy_enable)
             .map_err(|e| format!("无法恢复代理开关：{e}"))?;
+        let mut errors: Vec<String> = Vec::new();
         match snapshot.proxy_server.as_deref() {
             Some(value) => {
-                let _ = key.set_value("ProxyServer", &value.to_string());
+                if let Err(e) = key.set_value("ProxyServer", &value.to_string()) {
+                    errors.push(format!("ProxyServer：{e}"));
+                }
             }
             None => {
-                let _ = key.delete_value("ProxyServer");
+                if let Err(e) = key.delete_value("ProxyServer") {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!("ProxyServer：{e}"));
+                    }
+                }
             }
         }
         match snapshot.proxy_override.as_deref() {
             Some(value) => {
-                let _ = key.set_value("ProxyOverride", &value.to_string());
+                if let Err(e) = key.set_value("ProxyOverride", &value.to_string()) {
+                    errors.push(format!("ProxyOverride：{e}"));
+                }
             }
             None => {
-                let _ = key.delete_value("ProxyOverride");
+                if let Err(e) = key.delete_value("ProxyOverride") {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!("ProxyOverride：{e}"));
+                    }
+                }
             }
         }
         match snapshot.autoconfig_url.as_deref() {
             Some(value) => {
-                let _ = key.set_value("AutoConfigURL", &value.to_string());
+                if let Err(e) = key.set_value("AutoConfigURL", &value.to_string()) {
+                    errors.push(format!("AutoConfigURL：{e}"));
+                }
             }
             None => {
-                let _ = key.delete_value("AutoConfigURL");
+                if let Err(e) = key.delete_value("AutoConfigURL") {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!("AutoConfigURL：{e}"));
+                    }
+                }
             }
         }
-        let _ = key.set_value("AutoDetect", &snapshot.auto_detect);
+        if let Err(e) = key.set_value("AutoDetect", &snapshot.auto_detect) {
+            errors.push(format!("AutoDetect：{e}"));
+        }
         notify_change();
+        if !errors.is_empty() {
+            // 保留备份，下一次启动仍可继续恢复，避免丢失唯一的回滚记录。
+            return Err(format!("系统代理仅部分恢复：{}", errors.join("；")));
+        }
         std::fs::remove_file(Self::backup_path()).map_err(|e| format!("无法删除代理备份：{e}"))?;
         Ok(())
     }
