@@ -71,13 +71,20 @@ pub fn is_public_ip(text: &str) -> bool {
     };
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 100.64.0.0/10（运营商 CGNAT）与 198.18.0.0/15（基准测试段，
+            // mihomo fake-ip 默认池 198.18.0.1/16 落在这里）都不是真实公网地址。
+            let cgnat = o[0] == 100 && (64..128).contains(&o[1]);
+            let fake_ip = o[0] == 198 && (o[1] & 0xfe) == 18;
             !(v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
-                || v4.octets()[0] >= 224)
+                || cgnat
+                || fake_ip
+                || o[0] >= 224)
         }
         IpAddr::V6(v6) => {
             let head = v6.segments()[0];
@@ -97,7 +104,47 @@ fn looks_like_domain(host: &str) -> bool {
         && !host.parse::<IpAddr>().is_ok()
 }
 
+/// TUN 开启时系统 DNS 被 mihomo 劫持并返回 fake-ip（198.18.x.x），
+/// 需要走 DoH 拿真实解析结果。用 --resolve 钉住阿里 DoH 的 IP，
+/// 避免"解析 DoH 服务器域名"本身再被劫持。
+fn doh_query(host: &str, kind: u8) -> Option<String> {
+    let url = format!("https://dns.alidns.com/resolve?name={host}&type={kind}");
+    let output = command::run(
+        &paths::curl_binary(),
+        &[
+            "-s".into(),
+            "--noproxy".into(),
+            "*".into(),
+            "--max-time".into(),
+            "4".into(),
+            "--resolve".into(),
+            "dns.alidns.com:443:223.5.5.5".into(),
+            "-H".into(),
+            "accept: application/dns-json".into(),
+            url,
+        ],
+    )
+    .ok()?;
+    if output.code != 0 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&output.text).ok()?;
+    let answers = value.get("Answer")?.as_array()?;
+    answers
+        .iter()
+        .filter(|answer| answer.get("type").and_then(|v| v.as_u64()) == Some(kind as u64))
+        .filter_map(|answer| answer.get("data").and_then(|v| v.as_str()))
+        .find(|data| is_public_ip(data))
+        .map(|data| data.to_string())
+}
+
+fn doh_resolve(host: &str) -> Option<String> {
+    // 优先 A 记录，没有公网 IPv4 再查 AAAA。
+    doh_query(host, 1).or_else(|| doh_query(host, 28))
+}
+
 /// 与 macOS 版 publicAddress(for:) 一致：域名先解析 DNS，取第一个公网地址。
+/// 系统解析拿不到公网地址（例如 TUN fake-ip 劫持）时回退 DoH。
 pub fn public_address(host: &str) -> Option<String> {
     if is_public_ip(host) {
         return Some(host.to_string());
@@ -105,19 +152,23 @@ pub fn public_address(host: &str) -> Option<String> {
     if !looks_like_domain(host) {
         return None;
     }
-    let addresses = (host, 443).to_socket_addrs().ok()?;
-    let mut first_v6 = None;
-    for address in addresses {
-        let ip = address.ip().to_string();
-        if is_public_ip(&ip) {
-            if ip.contains(':') {
-                first_v6.get_or_insert(ip);
-            } else {
-                return Some(ip);
+    if let Ok(addresses) = (host, 443).to_socket_addrs() {
+        let mut first_v6 = None;
+        for address in addresses {
+            let ip = address.ip().to_string();
+            if is_public_ip(&ip) {
+                if ip.contains(':') {
+                    first_v6.get_or_insert(ip);
+                } else {
+                    return Some(ip);
+                }
             }
         }
+        if let Some(v6) = first_v6 {
+            return Some(v6);
+        }
     }
-    first_v6
+    doh_resolve(host)
 }
 
 fn query(ip: &str) -> Option<GeoLocation> {
@@ -188,4 +239,32 @@ pub fn location(host: &str) -> Option<GeoLocation> {
 /// 退出时把缓存落盘（后台线程结束时调用）。
 pub fn flush() {
     with_cache(|cache| persist(cache));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ip_filtering() {
+        // 真实公网地址保留。
+        assert!(is_public_ip("114.37.232.43"));
+        assert!(is_public_ip("1.1.1.1"));
+        // 私网 / 回环 / 链路本地排除。
+        assert!(!is_public_ip("192.168.1.1"));
+        assert!(!is_public_ip("10.0.0.1"));
+        assert!(!is_public_ip("127.0.0.1"));
+        assert!(!is_public_ip("169.254.1.1"));
+        // mihomo fake-ip 池（198.18.0.0/15）与 CGNAT（100.64.0.0/10）排除。
+        assert!(!is_public_ip("198.18.0.76"));
+        assert!(!is_public_ip("198.19.255.255"));
+        assert!(!is_public_ip("100.64.0.1"));
+        assert!(!is_public_ip("100.127.255.254"));
+        // 相邻段不误伤。
+        assert!(is_public_ip("198.20.0.1"));
+        assert!(is_public_ip("100.128.0.1"));
+        // 域名与非法输入。
+        assert!(!is_public_ip("example.com"));
+        assert!(!is_public_ip(""));
+    }
 }
