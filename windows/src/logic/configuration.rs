@@ -242,7 +242,13 @@ proxies:
         let providers = value["rule-providers"].as_object().expect("rule-providers");
         for name in ["cn-domains", "cn-custom", "cn-ips"] {
             let provider = providers.get(name).unwrap_or_else(|| panic!("provider {name}"));
-            assert!(provider["url"].as_str().unwrap().starts_with("https://"));
+            let filename = match name {
+                "cn-domains" => "direct.yaml",
+                "cn-custom" => "custom-direct.yaml",
+                "cn-ips" => "cncidr.yaml",
+                _ => unreachable!(),
+            };
+            assert_eq!(provider["url"], format!("https://raw.githubusercontent.com/MrTager/SmartClash-Rules/main/rules/{filename}"));
             assert_eq!(provider["proxy"], "SMART");
         }
         let rules = value["rules"].as_array().expect("rules");

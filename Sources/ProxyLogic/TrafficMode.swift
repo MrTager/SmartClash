@@ -8,7 +8,7 @@ public enum TrafficMode: String, Codable, CaseIterable, Identifiable {
     }
     public var explanation: String {
         switch self {
-        case .rule: return "按订阅规则分流：屏蔽广告，指定网站直连，其余流量走当前代理线路。"
+        case .rule: return "按自有规则仓库分流：国内域名和 IP 直连，其余流量走当前代理线路。"
         case .global: return "进入内核的业务流量全部走当前代理线路，跳过分流与屏蔽规则。"
         case .direct: return "进入内核的业务流量全部直连，不使用代理节点；系统代理和 TUN 可继续开启。"
         }

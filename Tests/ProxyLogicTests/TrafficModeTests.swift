@@ -63,6 +63,28 @@ final class TrafficModeTests: XCTestCase {
         let data = try XCTUnwrap(snapshot.providerPayloads()["sr-direct-domain"])
         XCTAssertEqual((try Yams.load(yaml: String(decoding: data, as: UTF8.self)) as? [String: [String]])?["payload"], ["+.direct.example"])
     }
+    func testOwnRepositoryPayloadsAndCacheSource() throws {
+        let domains = try SmartClashRuleParser.parse("payload:\n  - '+.example.cn'\n  - 'exact.example.cn'\n  - '+.example.cn'\n", ipcidr: false)
+        let ips = try SmartClashRuleParser.parse("payload:\n  - '1.0.1.0/24'\n  - '2001:db8::/32'\n", ipcidr: true)
+        XCTAssertEqual(domains.domains, ["+.example.cn", "exact.example.cn"])
+        XCTAssertEqual(ips.classical, ["IP-CIDR,1.0.1.0/24,no-resolve", "IP-CIDR6,2001:db8::/32,no-resolve"])
+        let direct = ConvertedRuleModule(domains: domains.domains, classical: ips.classical)
+        let snapshot = RuleSnapshot(modules: [.direct: direct], source: RuleSnapshot.repository)
+        XCTAssertTrue(snapshot.isComplete)
+        XCTAssertEqual(try JSONDecoder().decode(RuleSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+        XCTAssertFalse(RuleSnapshot(modules: [.direct: domains], source: RuleSnapshot.repository).isComplete)
+        XCTAssertFalse(RuleSnapshot(modules: [.direct: direct, .reject: domains], source: RuleSnapshot.repository).isComplete)
+        let legacy = RuleSnapshot(modules: [.direct: direct])
+        XCTAssertNil(try JSONDecoder().decode(RuleSnapshot.self, from: JSONEncoder().encode(legacy)).source)
+        let payload = try XCTUnwrap(snapshot.providerPayloads()["sr-direct-classical"])
+        XCTAssertEqual((try Yams.load(yaml: String(decoding: payload, as: UTF8.self)) as? [String: [String]])?["payload"], ips.classical)
+        for invalid in ["<html>error</html>", "payload: []", "payload: [123]", "payload: ['bad,domain']"] {
+            XCTAssertThrowsError(try SmartClashRuleParser.parse(invalid, ipcidr: false))
+        }
+        for invalid in ["payload: ['999.1.1.1/24']", "payload: ['1.1.1.1/99']"] {
+            XCTAssertThrowsError(try SmartClashRuleParser.parse(invalid, ipcidr: true))
+        }
+    }
     func testDownloadedUpstreamModulesConvertWhenOptedIn() throws {
         guard let directory = ProcessInfo.processInfo.environment["SMARTCLASH_RULE_FIXTURES"] else { throw XCTSkip("Opt-in downloaded upstream fixtures") }
         var modules: [RuleCategory: ConvertedRuleModule] = [:]

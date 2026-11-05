@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Yams
 
 public enum RuleCategory: String, Codable, CaseIterable, Sendable {
     case reject, proxy, direct
@@ -24,12 +25,20 @@ public struct RuleSnapshot: Codable, Equatable, Sendable {
     public static let updateInterval: TimeInterval = 3600
     public var modules: [RuleCategory: ConvertedRuleModule]
     public var updatedAt: Date
+    public var source: String?
+    public static let repository = "https://github.com/MrTager/SmartClash-Rules"
     public var count: Int { modules.values.reduce(0) { $0 + $1.count } }
     public var skipped: Int { modules.values.reduce(0) { $0 + $1.skipped } }
-    public var isComplete: Bool { RuleCategory.allCases.allSatisfy { (modules[$0]?.count ?? 0) > 0 } }
+    public var isComplete: Bool {
+        if source == Self.repository {
+            return (modules[.direct]?.domains.isEmpty == false) && (modules[.direct]?.classical.isEmpty == false)
+                && (modules[.proxy]?.count ?? 0) == 0 && (modules[.reject]?.count ?? 0) == 0
+        }
+        return RuleCategory.allCases.allSatisfy { (modules[$0]?.count ?? 0) > 0 }
+    }
     public func isDue(at now: Date = Date()) -> Bool { now.timeIntervalSince(updatedAt) >= Self.updateInterval }
-    public init(modules: [RuleCategory: ConvertedRuleModule], updatedAt: Date = Date()) {
-        self.modules = modules; self.updatedAt = updatedAt
+    public init(modules: [RuleCategory: ConvertedRuleModule], updatedAt: Date = Date(), source: String? = nil) {
+        self.modules = modules; self.updatedAt = updatedAt; self.source = source
     }
     public func providerPayloads() throws -> [String: Data] {
         var result: [String: Data] = [:]
@@ -43,6 +52,34 @@ public struct RuleSnapshot: Codable, Equatable, Sendable {
                     "  - \"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
                 }
                 result[category.provider(behavior)] = Data(("payload:\n" + lines.joined(separator: "\n") + "\n").utf8)
+            }
+        }
+        return result
+    }
+}
+
+/// Reads the repository's native Mihomo domain/ipcidr payloads.
+public enum SmartClashRuleParser {
+    public static func parse(_ text: String, ipcidr: Bool) throws -> ConvertedRuleModule {
+        guard text.utf8.count <= 20_000_000 else { throw ProxyError.message("规则文件超过 20 MB") }
+        guard let document = try Yams.load(yaml: text) as? [String: Any],
+              let entries = document["payload"] as? [String], !entries.isEmpty else {
+            throw ProxyError.message("规则文件缺少非空 payload，已保留旧版本")
+        }
+        var result = ConvertedRuleModule()
+        var seen = Set<String>()
+        for (index, value) in entries.enumerated() {
+            if index % 1024 == 0 { try Task.checkCancellation() }
+            guard seen.insert(value).inserted else { continue }
+            if ipcidr {
+                let kind = value.contains(":") ? "IP-CIDR6" : "IP-CIDR"
+                let converted = try ShadowrocketRuleParser.parse("[Rule]\n\(kind),\(value),DIRECT,no-resolve", category: .direct)
+                result.classical += converted.classical
+            } else {
+                guard !value.isEmpty, value.utf8.allSatisfy({
+                    (33...126).contains($0) && ![34, 39, 44, 47, 92].contains($0)
+                }) else { throw ProxyError.message("域名规则格式无效") }
+                result.domains.append(value)
             }
         }
         return result

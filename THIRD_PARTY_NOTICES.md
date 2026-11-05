@@ -31,8 +31,10 @@ The application draws its globe texture locally from these polygons; no remote m
 Approximate public-IP locations are obtained from https://ipwho.is/ and cached locally for 24 hours.
 Only public IP addresses are sent to the provider, without subscription credentials, node names, or requested hostnames.
 
-## Shadowrocket routing rules
+## SmartClash routing rules
 
-Project and corresponding source: https://github.com/GMOogway/shadowrocket-rules
-License: GNU General Public License v3.0 (GPL-3.0); see the upstream LICENSE.
-The application downloads the upstream DIRECT, PROXY and REJECT modules at runtime and converts supported rules locally. It checks for updates hourly while running. Rule snapshots are not bundled in the application or committed in this repository. Upstream URL-REGEX, USER-AGENT and malformed entries are not used; the application reports the skipped count. jsDelivr is an upstream-listed fallback mirror.
+Project and corresponding source: https://github.com/MrTager/SmartClash-Rules
+License: GNU General Public License v3.0 (GPL-3.0); see the rules repository LICENSE and README for upstream data attribution (including Loyalsoldier/clash-rules).
+The application downloads rules/direct.yaml, rules/custom-direct.yaml and rules/cncidr.yaml from the main branch at runtime. These provide domestic domain/IP direct routing; unmatched traffic uses SMART. macOS checks for updates hourly while running and uses jsDelivr for the same repository as a fallback. Windows uses Mihomo rule-providers with a seven-day interval. Rule snapshots are not bundled in the application or committed in this repository.
+
+The legacy Shadowrocket module parser remains for compatibility and tests; the application no longer downloads GMOogway/shadowrocket-rules modules. Original parser format source: https://github.com/GMOogway/shadowrocket-rules (GPL-3.0).
