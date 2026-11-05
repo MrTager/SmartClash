@@ -89,6 +89,14 @@ final class AppStore: ObservableObject {
                 preferences = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: settings))
             }
             preferences.interval = max(1, min(3600, preferences.interval))
+            // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
+            if let saved = preferences.proxyPort, Configuration.validateProxyPort(saved) != nil {
+                preferences.proxyPort = Configuration.defaultProxyPort
+                log("已保存的代理端口不可用，已回退为 \(Configuration.defaultProxyPort)")
+            }
+            let port = preferences.proxyPort ?? Configuration.defaultProxyPort
+            preferences.proxyPort = port
+            Configuration.proxyPort = port
             engine.configure(kind: preferences.kernel ?? .mihomo)
             try Files.write(JSONEncoder().encode(preferences), to: settings)
             api = CoreClient(secret: preferences.secret)
@@ -277,6 +285,77 @@ final class AppStore: ObservableObject {
         if errors.isEmpty { log("代理已停止，网络设置已恢复") }
         else { log("停止未完全成功：\(errors.joined(separator: "；"))") }
         if !errors.isEmpty { throw ProxyError.message(errors.joined(separator: "；")) }
+    }
+    /// 带现场恢复的内核重启：保留智能路由计划与当前出口，TUN 重启后复验出网，
+    /// 原本开启的系统代理会自动重新指向新端口。与 Windows 版 restart_core 语义一致。
+    func restartCore(preferredName: String? = nil) async throws {
+        guard running else { return }
+        let wasTun = tun
+        let wasSystemProxy = systemProxy
+        let wasDynamic = dynamicMode
+        let plan = routePlan
+        let previous = preferredName ?? selected
+        try await stop()
+        dynamicMode = wasDynamic; routePlan = plan
+        try await start(tun: wasTun, preferredName: previous)
+        if wasTun {
+            let result = try await verifyTunEgress()
+            internetStatus = "TUN 出网已验证 · \(result.milliseconds) ms"
+            routingStatus = "已打通"
+        }
+        if wasSystemProxy {
+            try await proxy.enable(); systemProxy = true
+        }
+        startMonitor()
+    }
+    /// 修改本地混合代理端口。运行中会自动重启内核使新端口生效；失败时回滚。
+    func changeProxyPort(_ port: Int) async throws {
+        let current = Configuration.proxyPort
+        guard current != port else { return }
+        if let message = Configuration.validateProxyPort(port) { throw ProxyError.message(message) }
+        preferences.proxyPort = port
+        Configuration.proxyPort = port
+        savePreferences()
+        log("本地代理端口改为 \(port)")
+        guard running else { return }
+        do { try await restartCore(preferredName: selected) }
+        catch {
+            // 新端口启动失败时回滚到原端口，避免界面与已停止的内核状态不一致。
+            preferences.proxyPort = current
+            Configuration.proxyPort = current
+            savePreferences()
+            log("端口 \(port) 启动失败，已回滚为 \(current)")
+            do { try await restartCore(preferredName: selected) }
+            catch { recovery = true; log("端口修改回滚失败，请停止并恢复网络") }
+            throw ProxyError.message("使用端口 \(port) 重启内核失败：\(error.localizedDescription)")
+        }
+        log("内核已用新端口重启")
+    }
+    /// 订阅刷新后把合并结果应用到运行中的内核：
+    /// Mihomo / sing-box 走 Clash 控制接口热重载完整配置；Xray 只能重启生效。
+    func reloadRunningCore() async throws {
+        guard running else { return }
+        if kernel.capabilities.liveSwitch {
+            let built = try KernelConfiguration.make(kind: kernel, nodes: nodes, secret: preferences.secret, tun: tun,
+                routes: routePlan?.candidates, extraProxies: routePlan?.definitions ?? [],
+                outboundInterface: outboundInterface, preferredName: selected, trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
+            try await engine.validate(data: built.data)
+            try await api.request("/configs?force=true", method: "PUT", body: ["payload": String(decoding: built.data, as: UTF8.self)])
+            if !selected.isEmpty { try? await api.select(selected, group: "SMART") }
+        } else {
+            try await restartCore(preferredName: selected)
+        }
+        rulesAppliedToCore = false
+        if running && kernel.capabilities.rules == .provider && ruleProviderBaseURL != nil && ruleSnapshot != nil {
+            do { try await api.updateRuleProviders(); rulesAppliedToCore = true }
+            catch { logBackground("规则暂未载入内核，\(trafficMode.title)继续运行") }
+        }
+        publishRoute()
+        log("运行中的内核已应用最新订阅（\(nodes.count) 个节点）")
+    }
+    /// 切换前的节点预检：用临时单节点内核完成一次 HTTPS 探测，不影响当前业务出口。
+    func latencySample(_ node: ProxyNode) async -> NodeLatency {
+        await EphemeralProbe.latency(kind: kernel, node: node)
     }
     func toggleSystem() async throws {
         if systemProxy { try await proxy.restore(); systemProxy = false; dynamicMode = false; routingStatus = "系统代理已关闭，内核继续运行"; return }
@@ -588,18 +667,22 @@ final class AppStore: ObservableObject {
         openAIStatus = "OpenAI 尚未检测"
         startMonitor()
     }
-    func withProbe<T>(_ node: ProxyNode, operation: () async throws -> T) async throws -> T {
+    func withProbe<T>(_ node: ProxyNode, operation: (Int) async throws -> T) async throws -> T {
+        // Xray 没有 Clash 控制接口，无法切换 PROBE 组；改用临时单节点内核完成探测。
+        if kernel == .xray {
+            try Task.checkCancellation()
+            return try await EphemeralProbe.run(kind: kernel, node: node, operation: operation)
+        }
         while probeInFlight { try await Task.sleep(nanoseconds: 100_000_000) }
         try Task.checkCancellation()
         probeInFlight = true
         defer { probeInFlight = false }
         try await api.select(node.name, group: "PROBE")
-        let result = try await operation()
         try Task.checkCancellation()
-        return result
+        return try await operation(Configuration.probePort)
     }
     func check(_ node: ProxyNode, openAI: Bool = true) async throws -> ProbeResult {
-        let result = try await withProbe(node) {
+        let result = try await withProbe(node) { _ in
             if openAI { return try await api.probe(port: Configuration.probePort) }
             return try await api.internetProbe(port: Configuration.probePort)
         }
@@ -627,12 +710,12 @@ final class AppStore: ObservableObject {
         if trafficMode == .direct { return }
         guard let current = routeNodes.first(where: { $0.name == selected }) else { return }
         if dynamicMode && routingStatus != "已打通" { try await rebuildRoutes(); return }
-        let internet = try await withProbe(current) { try await api.internetProbe(port: Configuration.probePort) }
+        let internet = try await withProbe(current) { _ in try await api.internetProbe(port: Configuration.probePort) }
         let networkText = internet.health == .healthy ? "HTTPS 出网正常" : "当前线路出网失败，正在检查备用"
         if internetStatus != networkText { internetStatus = networkText }
         let health: ProbeResult
         if internet.health == .healthy && (activeMode == .ai || Date().timeIntervalSince(lastOpenAIProbe) >= 30) {
-            let ai = try await withProbe(current) { try await api.probe(port: Configuration.probePort) }
+            let ai = try await withProbe(current) { _ in try await api.probe(port: Configuration.probePort) }
             lastOpenAIProbe = Date()
             health = activeMode == .ai ? ai : internet
             let text = "OpenAI：\(ai.detail)"; if openAIStatus != text { openAIStatus = text }

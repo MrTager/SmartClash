@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var section: String? = "概览"
     @State private var sourceName = ""
     @State private var sourceURL = ""
+    @State private var proxyPortInput = ""
     private let sections = [("概览", "network"), ("订阅聚合", "square.stack.3d.up"), ("链式代理", "link"), ("节点", "point.3.connected.trianglepath.dotted"), ("实时流量", "chart.xyaxis.line"), ("事件日志", "list.bullet.rectangle")]
     var body: some View {
         NavigationSplitView {
@@ -109,6 +110,24 @@ struct ContentView: View {
                             Button(store.tun ? "关闭 TUN" : "一键开启 TUN") {
                                 store.perform { try await store.toggleTun() }
                             }.disabled(store.recovery)
+                        }
+                        Divider()
+                        HStack {
+                            Label("本地代理端口", systemImage: "number")
+                            TextField(String(Configuration.defaultProxyPort), text: $proxyPortInput)
+                                .frame(width: 90).monospacedDigit()
+                                .onAppear { proxyPortInput = String(Configuration.proxyPort) }
+                                .onChange(of: store.preferences.proxyPort) { _ in
+                                    proxyPortInput = String(Configuration.proxyPort)
+                                }
+                            Button("应用") {
+                                let port = Int(proxyPortInput.trimmingCharacters(in: .whitespaces)) ?? -1
+                                store.perform { try await store.changeProxyPort(port) }
+                            }
+                            .disabled(store.busy || store.stopping || store.recovery)
+                            Spacer()
+                            Text("范围 1024–65535；运行中修改会自动重启内核生效。")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Divider()
                         HStack {

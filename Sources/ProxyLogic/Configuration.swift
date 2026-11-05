@@ -1,9 +1,25 @@
 import Foundation
 public enum Configuration {
-    public static let proxyPort = 7890
+    public static let defaultProxyPort = 7890
     public static let probePort = 7891
     public static let aggregatePort = 7892
     public static let controllerPort = 9090
+    // 当前生效的本地混合代理端口（HTTP + SOCKS）。默认 7890，可在概览页修改。
+    private static var activeProxyPort = defaultProxyPort
+    public static var proxyPort: Int {
+        get { activeProxyPort }
+        set { activeProxyPort = newValue }
+    }
+    /// 校验用户输入的代理端口：合法范围 1024–65535，且不得与内部保留端口冲突。
+    public static func validateProxyPort(_ port: Int) -> String? {
+        guard (1024...65535).contains(port) else { return "代理端口需在 1024–65535 之间" }
+        let reserved: [(Int, String)] = [
+            (probePort, "本地探测端口"), (aggregatePort, "订阅聚合端口"), (controllerPort, "内核控制端口"),
+            (KernelConfiguration.xraySocksPort, "Xray SOCKS 端口"), (KernelConfiguration.xrayAPIPort, "Xray 控制端口"),
+        ]
+        if let (_, label) = reserved.first(where: { $0.0 == port }) { return "端口 \(port) 与\(label)冲突，请换一个" }
+        return nil
+    }
     public static func make(nodes: [ProxyNode], secret: String, tun: Bool, routes: [ProxyNode]? = nil, extraProxies: [ProxyNode] = [], outboundInterface: String? = nil, preferredName: String? = nil, trafficMode: TrafficMode = .rule, ruleProviderBaseURL: String? = nil) throws -> Data {
         guard !nodes.isEmpty || trafficMode == .direct else { throw ProxyError.message("请先添加并更新订阅") }
         var names = (routes ?? nodes).map(\.name)

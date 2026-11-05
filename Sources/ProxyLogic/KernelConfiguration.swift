@@ -636,7 +636,7 @@ public enum KernelConfiguration {
 
     private static func serialize(_ object: [String: Any], error: String) throws -> Data {
         do { return try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) }
-        catch { throw ProxyError.message(error) }
+        catch { throw ProxyError.message(error.localizedDescription) }
     }
 }
 

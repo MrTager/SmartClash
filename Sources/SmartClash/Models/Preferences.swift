@@ -9,6 +9,8 @@ struct Preferences: Codable {
     var trafficMode: TrafficMode? = .rule
     // 旧版偏好文件没有该字段时按 Mihomo 处理。
     var kernel: KernelKind? = .mihomo
+    // 本地混合代理端口（HTTP + SOCKS）；旧版偏好文件缺省时回退默认端口。
+    var proxyPort: Int? = Configuration.defaultProxyPort
     var chain: ChainOptions? = nil
     var secret: String = UUID().uuidString + UUID().uuidString
     var subscriptionToken: String = UUID().uuidString
