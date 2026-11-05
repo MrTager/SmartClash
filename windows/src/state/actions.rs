@@ -708,8 +708,15 @@ fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
         )
     });
     if tun {
-        return tun_transition::restart(
-            &mut TunRestart { shared, epoch, dynamic, selected: previous, plan },
+        return restart_for_tun(
+            &mut TunRestart {
+                shared,
+                epoch,
+                dynamic,
+                selected: previous,
+                plan,
+                proxy_on: system_proxy,
+            },
             false,
             system_proxy,
         );
@@ -724,11 +731,33 @@ fn do_toggle_tun(shared: &Shared) -> Result<(), String> {
         return Err("操作已停止".into());
     }
     let (verified, plan) = with_store(shared, |store| (store.selected.clone(), store.route_plan.clone()));
-    tun_transition::restart(
-        &mut TunRestart { shared, epoch, dynamic, selected: verified, plan },
+    restart_for_tun(
+        &mut TunRestart {
+            shared,
+            epoch,
+            dynamic,
+            selected: verified,
+            plan,
+            proxy_on: system_proxy,
+        },
         true,
         system_proxy,
     )
+}
+
+/// TUN 切换失败（含验证失败自动回滚）后，系统代理开关必须回到真实状态：
+/// 切换过程里为了界面稳定会暂时显示“已开启”，这里用备份文件是否还在对齐。
+fn restart_for_tun(
+    runtime: &mut TunRestart<'_>,
+    tun: bool,
+    system_proxy: bool,
+) -> Result<(), String> {
+    let result = tun_transition::restart(runtime, tun, system_proxy);
+    if result.is_err() {
+        let shared = runtime.shared;
+        with_store(shared, |store| store.system_proxy = SystemProxy::has_backup());
+    }
+    result
 }
 
 struct TunRestart<'a> {
@@ -737,11 +766,19 @@ struct TunRestart<'a> {
     dynamic: bool,
     selected: String,
     plan: RoutePlan,
+    /// 切换前系统代理是否开启：切换过程中保持界面显示，避免看起来被 TUN 关掉。
+    proxy_on: bool,
 }
 
 impl TunRuntime for TunRestart<'_> {
     fn stop(&mut self) -> Result<(), String> {
-        do_stop(self.shared)
+        do_stop(self.shared)?;
+        // do_stop 会把系统代理恢复成 Windows 原设置，但这次停止只是 TUN 切换的中间步骤：
+        // 保持开关显示为切换前的状态，等 enable_system_proxy 或失败回滚再写回真实值。
+        if self.proxy_on {
+            with_store(self.shared, |store| store.system_proxy = true);
+        }
+        Ok(())
     }
 
     fn start(&mut self, tun: bool) -> Result<(), String> {
