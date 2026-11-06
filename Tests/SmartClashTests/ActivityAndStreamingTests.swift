@@ -18,9 +18,10 @@ final class ActivityAndStreamingTests: XCTestCase {
         XCTAssertFalse(store.busy)
         store.publishRoute(); store.logBackground("background fixture")
         XCTAssertFalse(store.busy)
-        store.perform { try await Task.sleep(nanoseconds: 30_000_000) }
+        let operation = store.perform { try await Task.sleep(nanoseconds: 30_000_000) }
         XCTAssertTrue(store.busy)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // Wait for completion rather than racing the CI runner's scheduler.
+        await operation.value
         XCTAssertFalse(store.busy)
     }
     @MainActor
