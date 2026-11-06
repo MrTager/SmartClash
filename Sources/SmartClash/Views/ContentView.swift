@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var sourceName = ""
     @State private var sourceURL = ""
     @State private var proxyPortInput = ""
+    @State private var advancedSettingsExpanded = false
     private let sections = [("概览", "network"), ("订阅聚合", "square.stack.3d.up"), ("链式代理", "link"), ("节点", "point.3.connected.trianglepath.dotted"), ("实时流量", "chart.xyaxis.line"), ("事件日志", "list.bullet.rectangle")]
     var body: some View {
         NavigationSplitView {
@@ -48,74 +49,90 @@ struct ContentView: View {
     }
     private var overview: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("让连接持续在线").font(.largeTitle.bold())
-                        Button(store.stopping ? "正在恢复网络…" : (store.running || store.busy ? "停止并恢复网络" : "一键打通")) {
-                            if store.running || store.busy { store.requestStop() }
-                            else { store.perform { try await store.oneClickConnect() } }
-                        }.buttonStyle(.borderedProminent)
-                        if store.busy && !store.stopping {
-                            Text("正在后台处理，可随时停止或执行其他操作").font(.caption).foregroundStyle(.secondary)
-                        }
-                        Text("聚合节点，监测 OpenAI API，自动寻找可用出口。")
-                            .foregroundStyle(.secondary)
-                        Text(store.internetStatus).font(.caption).foregroundStyle(.secondary)
-                        Text(store.openAIStatus).font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("连接概览").font(.title2.bold())
+                        Text(overviewStatus)
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if let icon = AppArtwork.icon {
-                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 76, height: 76)
-                            .accessibilityLabel("SmartClash 应用图标")
+                    if store.running || store.busy || store.recovery || store.stopping {
+                        Button(store.stopping ? "正在恢复网络…" : (store.recovery ? "恢复网络" : "停止并恢复网络")) {
+                            store.requestStop()
+                        }
+                        .disabled(store.stopping)
                     }
                 }
-                if store.recovery {
-                    GroupBox {
-                        HStack {
-                            Label("检测到未恢复的网络设置", systemImage: "exclamationmark.triangle")
-                            Spacer()
-                            Button("恢复网络") { store.requestStop() }
-                        }.padding(8)
-                    }
-                }
+                connectionControls
+                advancedSettings
                 TrafficRateBar(traffic: store.traffic)
                 NetworkGlobePanel(activity: store.activity, nodes: store.visualizationNodes, trace: store.activeTrace)
                 HStack(spacing: 16) {
                     metric("聚合节点", value: "\(store.nodes.count)", icon: "square.stack.3d.up")
                     metric("内核状态", value: store.running ? "运行中" : "已停止", icon: "power")
-                    metric("当前出口", value: store.trafficMode == .direct ? "直连" : (store.selected.isEmpty ? "尚未连接" : store.selected), icon: "location")
+                    metric("当前出口", value: !store.running ? "尚未连接" : (store.trafficMode == .direct ? "直连" : (store.selected.isEmpty ? "尚未连接" : store.selected)), icon: "location")
                 }
-                TrafficModeControls().environmentObject(store)
-                RoutingModeControls().environmentObject(store)
                 TrafficPanel(traffic: store.traffic)
-                GroupBox("代理控制") {
-                    VStack(spacing: 18) {
-                        HStack {
-                            Label("系统代理", systemImage: "globe")
-                            Spacer()
-                            Text(store.systemProxy ? "已开启" : "已关闭").foregroundStyle(.secondary)
-                            Button(store.systemProxy ? "关闭" : "一键开启") {
-                                store.perform { try await store.toggleSystem() }
-                            }.disabled(store.recovery)
+                if let recent = store.logs.first { Text(recent).font(.caption.monospaced()).foregroundStyle(.secondary) }
+            }
+        }
+    }
+    private var overviewStatus: String {
+        if store.stopping { return "正在恢复网络…" }
+        if store.recovery { return "检测到未恢复的网络设置，请先恢复网络。" }
+        if store.busy { return "正在处理，可随时停止并恢复网络。" }
+        return store.running ? "\(store.internetStatus) · \(store.openAIStatus)" : "已停止，开启系统代理或 TUN 以连接。"
+    }
+    private var connectionControls: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 24) {
+                    Toggle("系统代理", isOn: Binding(get: { store.systemProxy }, set: { wanted in
+                        guard wanted != store.systemProxy, !store.recovery, !store.stopping else { return }
+                        store.perform {
+                            guard wanted != store.systemProxy, !store.recovery, !store.stopping else { return }
+                            try await store.toggleSystem()
                         }
-                        Divider()
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Label("TUN 虚拟网卡", systemImage: "externaldrive.connected.to.line.below")
-                                Text("首次授权安装后台服务，之后开关无需重复授权。")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button(store.tun ? "关闭 TUN" : "一键开启 TUN") {
-                                store.perform { try await store.toggleTun() }
-                            }.disabled(store.recovery)
+                    }))
+                    .toggleStyle(.switch)
+                    .accessibilityLabel("系统代理")
+                    .disabled(store.recovery || store.stopping)
+                    .frame(maxWidth: .infinity)
+                    Toggle("TUN 虚拟网卡", isOn: Binding(get: { store.tun }, set: { wanted in
+                        guard wanted != store.tun, !store.recovery, !store.stopping, store.capabilities.tun else { return }
+                        store.perform {
+                            guard wanted != store.tun, !store.recovery, !store.stopping, store.capabilities.tun else { return }
+                            try await store.toggleTun()
                         }
-                        Divider()
+                    }))
+                    .toggleStyle(.switch)
+                    .accessibilityLabel("TUN 虚拟网卡")
+                    .disabled(store.recovery || store.stopping || !store.capabilities.tun)
+                    .help(store.capabilities.tun ? "切换 TUN 会重启内核，开关显示实际运行状态。" : "\(store.kernel.title) 内核不支持 TUN。")
+                    .frame(maxWidth: .infinity)
+                }
+                Divider()
+                TrafficModeControls(compact: true)
+                Divider()
+                RoutingModeControls(compact: true)
+            }.padding(8)
+        }
+    }
+    private var advancedSettings: some View {
+        DisclosureGroup("高级设置", isExpanded: $advancedSettingsExpanded) {
+            VStack(alignment: .leading, spacing: 16) {
+                TrafficModeControls(showsSelection: false)
+                RoutingModeControls(showsSelection: false)
+                GroupBox("代理设置") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("TUN 首次授权安装后台服务，之后开关无需重复授权。切换 TUN 会重启内核，请以顶部开关实际状态为准。")
+                            .font(.caption).foregroundStyle(.secondary)
                         HStack {
                             Label("本地代理端口", systemImage: "number")
                             TextField(String(Configuration.defaultProxyPort), text: $proxyPortInput)
                                 .frame(width: 90).monospacedDigit()
+                                .accessibilityLabel("本地代理端口")
                                 .onAppear { proxyPortInput = String(Configuration.proxyPort) }
                                 .onChange(of: store.preferences.proxyPort) { _ in
                                     proxyPortInput = String(Configuration.proxyPort)
@@ -126,30 +143,30 @@ struct ContentView: View {
                             }
                             .disabled(store.busy || store.stopping || store.recovery)
                             Spacer()
-                            Text("范围 1024–65535；运行中修改会自动重启内核生效。")
-                                .font(.caption).foregroundStyle(.secondary)
                         }
+                        Text("范围 1024–65535；运行中修改会自动重启内核生效。")
+                            .font(.caption).foregroundStyle(.secondary)
                         Divider()
                         HStack {
+                            Button("连接并验证") { store.perform { try await store.oneClickConnect() } }
+                                .disabled(store.running || store.busy || store.stopping || store.recovery)
                             Button(store.running || store.busy ? "停止内核并恢复网络" : "仅启动内核") {
                                 if store.running || store.busy { store.requestStop() }
                                 else { store.perform { try await store.start() } }
-                            }.disabled(!store.running && !store.busy && store.recovery)
+                            }.disabled(store.stopping || (!store.running && !store.busy && store.recovery))
                             Spacer()
                             Text("HTTP / SOCKS · 127.0.0.1:\(Configuration.proxyPort)").font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
-                    }.padding(12)
-                    HStack {
+                        Divider()
                         Text("系统代理与 TUN 共用一次授权；重开应用和重启电脑后继续有效。")
                             .font(.caption).foregroundStyle(.secondary)
-                        Spacer()
                         Button("配置一次授权") {
                             store.perform {
                                 try await PrivilegedClient.shared.prepare()
                                 store.log("后台服务已就绪，系统代理与 TUN 开关无需重复授权")
                             }
-                        }
-                    }.padding(.horizontal, 12).padding(.bottom, 8)
+                        }.disabled(store.busy || store.stopping || store.recovery)
+                    }.padding(8)
                 }
                 GroupBox("智能切换") {
                     VStack(alignment: .leading, spacing: 15) {
@@ -161,19 +178,20 @@ struct ContentView: View {
                                 Text("1 秒").tag(1); Text("5 秒").tag(5); Text("15 秒").tag(15)
                                 Text("1 分钟").tag(60); Text("5 分钟").tag(300)
                             }.labelsHidden().frame(width: 160)
+                                .accessibilityLabel("智能切换检测间隔")
                                 .onChange(of: store.preferences.interval) { _ in store.savePreferences() }
                             Spacer()
                             Button("立即检测 / 故障切换") { store.perform { try await store.inspectCurrent(force: true) } }
-                                .disabled(!store.running)
+                                .disabled(!store.running || store.busy || store.stopping || store.recovery)
                         }
                         Text("连续失败 2 次触发切换，切换冷却 30 秒。限流与不确定结果不触发切换。检测不重叠，实际周期包含请求耗时；推荐 1 分钟。")
                             .font(.caption).foregroundStyle(.secondary)
                         Text("未使用 API Key：检测仅确认 OpenAI API 的访问结果，不保证 ChatGPT 网页登录、验证码或账号可用性。切换影响新连接，已有请求可能需要重试。")
                             .font(.caption).foregroundStyle(.secondary)
+                        Text(store.openAIStatus).font(.caption).foregroundStyle(.secondary)
                     }.padding(12)
                 }
-                if let recent = store.logs.first { Text(recent).font(.caption.monospaced()).foregroundStyle(.secondary) }
-            }
+            }.padding(.top, 12)
         }
     }
     private func metric(_ title: String, value: String, icon: String) -> some View {

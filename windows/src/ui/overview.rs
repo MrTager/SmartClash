@@ -1,206 +1,183 @@
 use super::widgets::{self, hint};
 use super::{Action, ViewState};
 use crate::state::Store;
-use egui::{Margin, RichText, Rounding, Stroke, Ui};
+use egui::{RichText, Ui};
 
-pub fn draw(
-    view: &mut ViewState,
-    store: &mut Store,
-    ui: &mut Ui,
-    pending: &mut Vec<Action>,
-) {
-    // ---- 英雄区 ----
-    egui::Frame::default()
-        .fill(widgets::HERO_BG)
-        .stroke(Stroke::new(1.0, widgets::HERO_BORDER))
-        .rounding(Rounding::same(12.0))
-        .inner_margin(Margin::same(18.0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("让连接持续在线").size(24.0).strong().color(widgets::TEXT));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        let (fg, bg) = widgets::status_color(&store.internet_status);
-                        widgets::status_pill(ui, &store.internet_status, fg, bg);
-                        let (fg, bg) = widgets::status_color(&store.openai_status);
-                        widgets::status_pill(ui, &store.openai_status, fg, bg);
-                    });
-                    ui.add_space(12.0);
-                    let running = store.running || store.busy;
-                    let (label, fill) = if running {
-                        ("停止并恢复网络", widgets::BAD)
-                    } else {
-                        ("一键打通", widgets::ACCENT)
-                    };
-                    if widgets::primary_button(
-                        ui,
-                        label,
-                        fill,
-                        !store.stopping,
-                        egui::vec2(184.0, 40.0),
-                    ) {
-                        pending.push(if running {
-                            Action::Stop
-                        } else {
-                            Action::Connect
-                        });
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if store.busy {
-                        ui.vertical(|ui| {
-                            ui.spinner();
-                            hint(ui, "正在执行操作，可随时停止");
-                        });
-                    }
-                });
-            });
-        });
-    ui.add_space(10.0);
-
-    if store.recovery {
-        widgets::card_frame()
-            .fill(widgets::WARN_DIM)
-            .stroke(Stroke::new(1.0, widgets::WARN))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("● 检测到未恢复的网络设置")
-                            .size(13.0)
-                            .strong()
-                            .color(widgets::WARN),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                !store.stopping,
-                                egui::Button::new(
-                                    RichText::new("恢复网络").size(13.0).color(widgets::WARN),
-                                )
-                                .stroke(Stroke::new(1.0, widgets::WARN)),
-                            )
-                            .clicked()
-                        {
-                            pending.push(Action::Stop);
-                        }
-                    });
-                });
-            });
-        ui.add_space(10.0);
-    }
-
-    // ---- 指标 ----
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
-        widgets::metric(ui, "聚合节点", &store.nodes.len().to_string(), widgets::ACCENT);
-        widgets::metric(
-            ui,
-            "内核状态",
-            if store.running { "运行中" } else { "已停止" },
-            if store.running { widgets::GOOD } else { widgets::MUTED },
+pub fn draw(view: &mut ViewState, store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("连接控制")
+                .size(18.0)
+                .strong()
+                .color(widgets::TEXT),
         );
-        widgets::metric(
-            ui,
-            "当前出口",
-            if !store.preferences.traffic_mode.uses_proxy() {
-                "直连"
-            } else if store.selected.is_empty() {
-                "尚未连接"
-            } else {
-                store.selected.as_str()
-            },
-            if !store.preferences.traffic_mode.uses_proxy() {
-                widgets::MUTED
-            } else {
-                widgets::GOOD
-            },
-        );
-    });
-    ui.add_space(6.0);
-
-    widgets::kernel_controls(store, ui, pending);
-    ui.add_space(2.0);
-
-    widgets::traffic_mode_controls(store, ui, pending);
-    ui.add_space(2.0);
-
-    super::globe::draw(store, ui, view);
-
-    widgets::routing_controls(store, ui, pending);
-    ui.add_space(4.0);
-
-    widgets::card(ui, Some("代理控制"), |ui| {
-        hint(ui, "系统代理与 TUN 可以同时开启，分别开关互不影响。");
-        ui.add_space(8.0);
-        let can_toggle = !store.busy && !store.recovery && !store.stopping;
-        if widgets::toggle_row(
-            ui,
-            "系统代理",
-            "开启 Windows 系统 HTTP / HTTPS 代理（写入当前用户注册表）。",
-            store.system_proxy,
-            "一键开启",
-            "关闭",
-            can_toggle,
-        ) {
-            pending.push(Action::ToggleSystem);
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        let tun_supported = store.preferences.kernel.capabilities().tun;
-        if widgets::toggle_row(
-            ui,
-            "TUN 虚拟网卡",
-            if tun_supported {
-                "接管更多应用流量；开启和关闭都需要管理员授权（每次弹 UAC）。"
-            } else {
-                "当前内核不支持 TUN；请切换到 Mihomo 或 sing-box。"
-            },
-            store.tun,
-            "一键开启 TUN",
-            "关闭 TUN",
-            can_toggle && tun_supported,
-        ) {
-            pending.push(Action::ToggleTun);
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        let (status, color) = if store.stopping {
+            ("正在停止并恢复网络", widgets::WARN)
+        } else if store.recovery {
+            ("网络设置待恢复", widgets::WARN)
+        } else if store.busy {
+            ("正在执行操作", widgets::ACCENT)
+        } else if store.is_testing_latency {
+            ("正在测速", widgets::ACCENT)
+        } else if store.running {
+            ("内核运行中", widgets::GOOD)
+        } else {
+            ("内核已停止", widgets::MUTED)
+        };
+        ui.label(RichText::new(status).size(12.0).color(color));
+        if store.running || store.busy || store.recovery || store.system_proxy || store.tun {
             if ui
                 .add_enabled(
-                    !store.stopping && (store.running || !store.recovery),
-                    egui::Button::new(if store.running {
-                        "停止内核并恢复网络"
-                    } else {
-                        "仅启动内核"
-                    }),
+                    !store.stopping,
+                    egui::Button::new(
+                        RichText::new(if store.recovery {
+                            "恢复网络"
+                        } else {
+                            "停止并恢复网络"
+                        })
+                        .size(12.0)
+                        .color(widgets::WARN),
+                    )
+                    .fill(widgets::WARN_DIM)
+                    .stroke(egui::Stroke::new(1.0_f32, widgets::WARN)),
                 )
                 .clicked()
             {
-                pending.push(if store.running {
-                    Action::Stop
-                } else {
-                    Action::StartOnly
-                });
+                pending.push(Action::Stop);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                hint(
-                    ui,
-                    &format!("HTTP / SOCKS · 127.0.0.1:{}", crate::logic::model::proxy_port()),
-                );
-            });
-        });
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        port_controls(view, store, ui, pending);
+        }
     });
+    ui.add_space(6.0);
 
+    core_controls(store, ui, pending);
+    ui.add_space(6.0);
+
+    if store.running && !store.stopping && !store.recovery && !store.is_testing_latency {
+        ui.horizontal_wrapped(|ui| {
+            let (fg, bg) = widgets::status_color(&store.internet_status);
+            widgets::status_pill(ui, &store.internet_status, fg, bg);
+            let (fg, bg) = widgets::status_color(&store.openai_status);
+            widgets::status_pill(ui, &store.openai_status, fg, bg);
+        });
+        ui.add_space(6.0);
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        widgets::metric(
+            ui,
+            "聚合节点",
+            &store.nodes.len().to_string(),
+            widgets::ACCENT,
+        );
+        widgets::metric(
+            ui,
+            "内核状态",
+            if store.stopping {
+                "正在停止"
+            } else if store.running {
+                "运行中"
+            } else {
+                "已停止"
+            },
+            if store.running && !store.stopping {
+                widgets::GOOD
+            } else {
+                widgets::MUTED
+            },
+        );
+        let exit = if store.stopping {
+            "正在停止"
+        } else if store.recovery {
+            "待恢复网络"
+        } else if !store.running {
+            "尚未连接"
+        } else if !store.preferences.traffic_mode.uses_proxy() {
+            "直连"
+        } else if store.selected.is_empty() {
+            "尚未选路"
+        } else {
+            store.selected.as_str()
+        };
+        widgets::metric(ui, "当前出口", exit, widgets::TEXT);
+    });
+    ui.add_space(6.0);
+    super::globe::draw(store, ui, view);
+    ui.add_space(4.0);
+
+    egui::CollapsingHeader::new(RichText::new("高级设置").strong().color(widgets::TEXT))
+        .id_salt("overview_advanced")
+        .default_open(false)
+        .show(ui, |ui| {
+            widgets::kernel_controls(store, ui, pending);
+            widgets::traffic_mode_details(store, ui, pending);
+            widgets::routing_details(store, ui);
+            widgets::card(ui, Some("内核与端口"), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let can_start = !store.running && widgets::controls_enabled(store);
+                    if widgets::accent_button(ui, "连接并验证", can_start) {
+                        pending.push(Action::Connect);
+                    }
+                    if ui
+                        .add_enabled(can_start, egui::Button::new("仅启动内核"))
+                        .clicked()
+                    {
+                        pending.push(Action::StartOnly);
+                    }
+                    hint(
+                        ui,
+                        &format!(
+                            "HTTP / SOCKS · 127.0.0.1:{}",
+                            crate::logic::model::proxy_port()
+                        ),
+                    );
+                });
+                hint(ui, "连接并验证会接管系统代理；仅启动内核不接管系统网络。");
+                ui.add_space(8.0);
+                port_controls(view, store, ui, pending);
+            });
+            automatic_controls(store, ui, pending);
+        });
+}
+
+fn core_controls(store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
+    widgets::card(ui, None, |ui| {
+        ui.spacing_mut().item_spacing.x = widgets::CONTROL_GAP;
+        let enabled = widgets::controls_enabled(store);
+        let tun_supported = store.preferences.kernel.capabilities().tun;
+        ui.columns(2, |columns| {
+            if widgets::proxy_switch(
+                &mut columns[0],
+                "系统代理",
+                "开启 Windows 系统 HTTP / HTTPS 代理（当前用户）；可与 TUN 同时开启，互不影响。",
+                store.system_proxy,
+                enabled,
+            ).clicked() {
+                pending.push(Action::ToggleSystem);
+            }
+            if widgets::proxy_switch(
+                &mut columns[1],
+                "TUN 虚拟网卡",
+                if tun_supported {
+                    "接管更多应用流量。首次需要管理员授权，后续复用计划任务；计划任务不可用或执行失败时会回退旧流程，可能再次请求授权。"
+                } else {
+                    "当前内核不支持 TUN；请在高级设置切换到 Mihomo 或 sing-box。"
+                },
+                store.tun,
+                enabled && tun_supported,
+            ).clicked() {
+                pending.push(Action::ToggleTun);
+            }
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        widgets::traffic_mode_selector(store, ui, pending);
+        ui.add_space(4.0);
+        ui.separator();
+        widgets::routing_selector(store, ui, pending);
+    });
+}
+
+fn automatic_controls(store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
     widgets::card(ui, Some("智能切换"), |ui| {
         let mut automatic = store.preferences.automatic;
         if ui
@@ -232,7 +209,7 @@ pub fn draw(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
-                        store.running && !store.busy,
+                        store.running && widgets::controls_enabled(store),
                         egui::Button::new("立即检测 / 故障切换"),
                     )
                     .clicked()
@@ -254,12 +231,7 @@ pub fn draw(
 }
 
 /// 本地代理端口编辑：缓冲仅在与偏好值不同步时刷新，避免逐帧覆盖正在输入的内容。
-fn port_controls(
-    view: &mut ViewState,
-    store: &mut Store,
-    ui: &mut Ui,
-    pending: &mut Vec<Action>,
-) {
+fn port_controls(view: &mut ViewState, store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
     if view.proxy_port_synced_to != store.preferences.proxy_port {
         view.proxy_port_input = store.preferences.proxy_port.to_string();
         view.proxy_port_synced_to = store.preferences.proxy_port;
@@ -271,8 +243,7 @@ fn port_controls(
                 .desired_width(72.0)
                 .hint_text(crate::logic::model::DEFAULT_PROXY_PORT.to_string()),
         );
-        let enter = input.lost_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let can_apply = !store.busy && !store.stopping && !store.recovery;
         let mut submit = enter && input.changed();
         if widgets::accent_button(ui, "应用", can_apply) {
