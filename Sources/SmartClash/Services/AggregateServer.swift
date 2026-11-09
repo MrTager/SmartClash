@@ -4,6 +4,8 @@ import ProxyLogic
 final class AggregateServer {
     private let queue = DispatchQueue(label: "com.smartclash.subscription")
     private var listener: NWListener?
+    private var stopped = true
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var payload = Data()
     private var rulePayloads: [String: Data] = [:]
     private let token: String
@@ -26,17 +28,31 @@ final class AggregateServer {
             if case .failed(_) = state { onError("本机订阅端口 \(Configuration.aggregatePort) 无法监听，请检查端口冲突") }
         }
         listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { connection.cancel(); return }
+            guard let self, !self.stopped else { connection.cancel(); return }
+            let id = ObjectIdentifier(connection)
+            self.connections[id] = connection
+            connection.stateUpdateHandler = { [weak self] state in
+                if case .cancelled = state { self?.connections[id] = nil }
+            }
             connection.start(queue: self.queue)
-            // A stalled local connection cannot retain resources indefinitely.
+            // 停滞的本机连接有上限，退出则立即取消所有已接受连接。
             self.queue.asyncAfter(deadline: .now() + 5) { connection.cancel() }
             self.receive(connection, buffer: Data())
         }
-        self.listener = listener; listener.start(queue: queue)
+        queue.sync { stopped = false; self.listener = listener }
+        listener.start(queue: queue)
+    }
+    func stop() {
+        queue.sync {
+            stopped = true
+            listener?.cancel(); listener = nil
+            for connection in connections.values { connection.cancel() }
+            connections.removeAll()
+        }
     }
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, complete, error in
-            guard let self else { connection.cancel(); return }
+            guard let self, !self.stopped else { connection.cancel(); return }
             var request = buffer; request.append(data ?? Data())
             guard request.count <= 8192 else { connection.cancel(); return }
             if let text = String(data: request, encoding: .utf8), text.contains("\r\n\r\n") {

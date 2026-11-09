@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 import ProxyLogic
 
 /// 临时单节点内核探测。
@@ -9,6 +8,8 @@ import ProxyLogic
 enum EphemeralProbe {
     static func run<T>(kind: KernelKind, node: ProxyNode,
                        operation: (Int) async throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        guard await GuardianClient.shared.ready else { throw CancellationError() }
         let resources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources")
         let executable = resources.appendingPathComponent(kind.binaryName)
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
@@ -19,36 +20,37 @@ enum EphemeralProbe {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let config = directory.appendingPathComponent("probe.json")
-        try Files.write(try KernelConfiguration.probeConfig(kind: kind, node: node, port: port), to: config)
-        let log = directory.appendingPathComponent("probe.log")
-        FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        let handle = try FileHandle(forWritingTo: log)
-
-        let process = Process()
-        process.executableURL = executable
-        process.currentDirectoryURL = directory
-        process.standardOutput = handle
-        process.standardError = handle
+        let arguments: [String]
         switch kind {
-        case .mihomo:
-            process.arguments = ["-d", directory.path, "-f", config.path]
-        case .singBox:
-            process.arguments = ["run", "-c", config.path, "-D", directory.path]
-        case .xray:
-            process.arguments = ["run", "-c", config.path]
-            process.environment = ["XRAY_LOCATION_ASSET": resources.path]
+        case .mihomo: arguments = ["-d", directory.path, "-f", config.path]
+        case .singBox: arguments = ["run", "-c", config.path, "-D", directory.path]
+        case .xray: arguments = ["run", "-c", config.path]
         }
-        try process.run()
-        defer {
-            if process.isRunning { process.terminate() }
-            for _ in 0..<30 where process.isRunning { usleep(50_000) }
-            try? handle.close()
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            // 仅清理本次探测创建的临时目录。
+        let environment = kind == .xray ? ["XRAY_LOCATION_ASSET": resources.path] : [:]
+        var childID: String?
+        do {
+            try Files.write(try KernelConfiguration.probeConfig(kind: kind, node: node, port: port), to: config)
+            let id = try await GuardianClient.shared.spawn(executable: executable, arguments: arguments,
+                                                           directory: directory, environment: environment)
+            childID = id
+            let log = Files.root.appendingPathComponent("guardian-\(id).log")
+            try await waitReady(id: id, port: port, log: log)
+            try Task.checkCancellation()
+            guard await GuardianClient.shared.ready else { throw CancellationError() }
+            let result = try await operation(port)
+            try await GuardianClient.shared.stop(id)
+            childID = nil
+            try FileManager.default.removeItem(at: directory)
+            return result
+        } catch {
+            if let id = childID {
+                // 先确认内核回收；失败则保留配置目录与 guardian 恢复记录。
+                do { try await GuardianClient.shared.stop(id) }
+                catch { throw ProxyError.message("临时探测内核停止未确认：\(error.localizedDescription)") }
+            }
             try? FileManager.default.removeItem(at: directory)
+            throw error
         }
-        try await waitReady(process: process, port: port, log: log)
-        return try await operation(port)
     }
 
     static func latency(kind: KernelKind, node: ProxyNode, timeout: Int = 5000) async -> NodeLatency {
@@ -69,10 +71,12 @@ enum EphemeralProbe {
         }
     }
 
-    private static func waitReady(process: Process, port: Int, log: URL) async throws {
+    private static func waitReady(id: String, port: Int, log: URL) async throws {
         for _ in 0..<80 {
             try Task.checkCancellation()
-            guard process.isRunning else {
+            guard await GuardianClient.shared.ready else { throw CancellationError() }
+            let status = try await GuardianClient.shared.status(id)
+            guard status.running == true else {
                 throw ProxyError.message("探测内核提前退出\(logTail(log))")
             }
             if let result = try? await Command.run("/usr/sbin/lsof",

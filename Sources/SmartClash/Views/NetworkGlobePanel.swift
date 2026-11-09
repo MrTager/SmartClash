@@ -37,6 +37,9 @@ struct NetworkGlobePanel: View {
                         Text(last.name.components(separatedBy: " · ").first ?? last.name)
                             .font(.headline).foregroundStyle(.white).lineLimit(1)
                     }
+                    if !trace.hops.isEmpty && data.selectedLocation == nil {
+                        Text("当前节点位置待解析").font(.caption).foregroundStyle(.white.opacity(0.65))
+                    }
                     Text("\(data.mappedNodes) 处节点 · \(data.mappedConnections) 个请求已定位")
                         .font(.caption).foregroundStyle(.white.opacity(0.65))
                     if activity.resolving { Text("正在解析 IP 位置…").font(.caption2).foregroundStyle(.white.opacity(0.5)) }
@@ -46,11 +49,11 @@ struct NetworkGlobePanel: View {
                         legend("请求目标 / 流向", color: .orange)
                         Spacer()
                         Button {
-                            let location = data.markers.first(where: { $0.active && $0.isNode })?.location
-                            renderer.resetCamera(toward: location)
+                            if let location = data.selectedLocation { renderer.resetCamera(toward: location) }
                         } label: { Image(systemName: "scope") }
-                        .buttonStyle(.borderless).foregroundStyle(.white.opacity(0.85)).help("回到当前节点")
+                        .buttonStyle(.borderless).foregroundStyle(.white.opacity(0.85)).help("回到当前节点服务器 IP 的近似位置，并非实际出网 IP")
                         .accessibilityLabel("回到当前节点")
+                        .disabled(data.selectedLocation == nil)
                     }
                 }.padding(16).allowsHitTesting(true)
                 if !activity.enabled {
@@ -75,9 +78,10 @@ struct NetworkGlobePanel: View {
             if showConnections {
                 connections
             }
-            Text("IP 位置由 ipwho.is 提供并缓存 24 小时；目标 IP 缺失时按本机 DNS 估算。未定位与直连请求保留在列表。连线表示地理关系。")
+            Text("节点位置为节点服务器 IP 的近似位置，并非实际出网 IP。IP 位置由 ipwho.is 提供并缓存 24 小时；目标 IP 缺失时按本机 DNS 估算。未定位与直连请求保留在列表。连线表示地理关系。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
+        .onChange(of: trace) { _ in focusedConnection = nil }
         .onChange(of: activity.connections.map(\.id)) { ids in
             if let focusedConnection, !ids.contains(focusedConnection) { self.focusedConnection = nil }
         }

@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Scheme LastUpgradeVersion="1600" version="1.3">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+    <BuildActionEntries>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="BEE31FF9C63B202EA61C6354" BuildableName="SmartClashManager.app" BlueprintName="SmartClashManager" ReferencedContainer="container:SmartClash.xcodeproj" />
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+    <Testables>
+      <TestableReference skipped="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="39EAF8936E27E7DD052C0016" BuildableName="SmartClashTests.xctest" BlueprintName="SmartClashTests" ReferencedContainer="container:SmartClash.xcodeproj" />
+      </TestableReference>
+    </Testables>
+  </TestAction>
+  <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="BEE31FF9C63B202EA61C6354" BuildableName="SmartClashManager.app" BlueprintName="SmartClashManager" ReferencedContainer="container:SmartClash.xcodeproj" />
+    </BuildableProductRunnable>
+  </LaunchAction>
+  <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="BEE31FF9C63B202EA61C6354" BuildableName="SmartClashManager.app" BlueprintName="SmartClashManager" ReferencedContainer="container:SmartClash.xcodeproj" />
+    </BuildableProductRunnable>
+  </ProfileAction>
+  <AnalyzeAction buildConfiguration="Debug" />
+  <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES" />
+</Scheme>

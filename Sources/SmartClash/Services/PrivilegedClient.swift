@@ -3,14 +3,18 @@ import ServiceManagement
 import PrivilegedSupport
 import ProxyLogic
 import Darwin
+import LifecycleSupport
 
 private final class XPCReply<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
     private var connection: NSXPCConnection?
     private var timeout: DispatchWorkItem?
-    init(_ continuation: CheckedContinuation<Value, Error>, connection: NSXPCConnection, seconds: TimeInterval) {
+    private let invalidatesConnection: Bool
+    init(_ continuation: CheckedContinuation<Value, Error>, connection: NSXPCConnection, seconds: TimeInterval,
+         invalidatesConnection: Bool = true) {
         self.continuation = continuation; self.connection = connection
+        self.invalidatesConnection = invalidatesConnection
         let timeout = DispatchWorkItem { [weak self] in
             self?.finish(.failure(ProxyError.message("后台服务响应超时，请恢复网络后重试")))
         }
@@ -23,7 +27,8 @@ private final class XPCReply<Value>: @unchecked Sendable {
         let connection = self.connection; self.connection = nil
         let timeout = self.timeout; self.timeout = nil
         lock.unlock()
-        timeout?.cancel(); waiting?.resume(with: result); connection?.invalidate()
+        timeout?.cancel(); waiting?.resume(with: result)
+        if invalidatesConnection { connection?.invalidate() }
     }
 }
 
@@ -32,6 +37,87 @@ final class PrivilegedClient {
     static let shared = PrivilegedClient()
     private var installation: HelperInstallation?
     private var preparation: Task<Void, Error>?
+    private var sessionConnection: NSXPCConnection?
+    private let nonce = UUID().uuidString
+    private var sessionPreparation: Task<Void, Error>?
+    private var terminating = false
+    private var sessionLost = false
+    private var sessionReplies: [UUID: (NSXPCConnection, (Error) -> Void)] = [:]
+    private(set) var proxyPending = false
+    private(set) var tunPending = false
+    var hasSession: Bool { sessionConnection != nil }
+    func closeGate() { terminating = true }
+    func reconcileAtStartup() async throws {
+        try checkGate()
+        guard FileManager.default.fileExists(atPath: HelperLocation.manifest) else {
+            guard !FileManager.default.fileExists(atPath: HelperLocation.corePlist) else { throw LifecycleError.refused("发现旧 TUN 服务但没有可信安装记录") }
+            return
+        }
+        // 不在启动恢复时安装或提示授权；无法联络已安装 helper 时禁止业务初始化。
+        let installed = try PropertyListDecoder().decode(HelperInstallation.self, from: Data(contentsOf: URL(fileURLWithPath: HelperLocation.manifest)))
+        guard installed.version == HelperLocation.version, installed.ownerUID == getuid() else { throw LifecycleError.refused("后台服务需要更新；启动对账未完成") }
+        installation = installed
+        try await openSession()
+    }
+    private func checkGate() throws {
+        guard !terminating else { throw CancellationError() }
+        try Task.checkCancellation()
+    }
+    private func openSession(cleanup: Bool = false) async throws {
+        if !cleanup { try checkGate() }
+        if sessionConnection != nil { return }
+        guard cleanup || !sessionLost else { throw LifecycleError.refused("后台会话已断开，恢复未确认；请停止并重试退出") }
+        if let sessionPreparation { return try await sessionPreparation.value }
+        let task = Task { @MainActor in
+            if !cleanup { try self.checkGate() }
+            let connection = NSXPCConnection(machServiceName: HelperLocation.label, options: .privileged)
+            connection.setCodeSigningRequirement(try self.identity().helperRequirement)
+            connection.remoteObjectInterface = NSXPCInterface(with: PrivilegedXPC.self)
+            connection.invalidationHandler = { [weak self, weak connection] in Task { @MainActor in
+                guard let self, let connection else { return }
+                self.connectionLost(connection)
+            } }
+            connection.interruptionHandler = { connection.invalidate() }
+            connection.resume()
+            do {
+                try await self.sessionOperation(connection) { $0.beginSession(self.nonce, withReply: $1) }
+                // 即使退出已开始也先保留连接，交给 endSession 确认恢复后关闭。
+                self.sessionConnection = connection
+                self.sessionLost = false
+            } catch { self.sessionLost = true; connection.invalidate(); throw error }
+        }
+        sessionPreparation = task
+        defer { sessionPreparation = nil }
+        try await task.value
+        if !cleanup { try checkGate() }
+    }
+    private func connectionLost(_ connection: NSXPCConnection) {
+        if sessionConnection === connection { sessionConnection = nil; sessionLost = true }
+        let waiting = sessionReplies.filter { $0.value.0 === connection }
+        for (id, entry) in waiting {
+            sessionReplies[id] = nil
+            entry.1(LifecycleError.refused("后台会话连接已断开，恢复未确认"))
+        }
+    }
+    func endSession() async throws {
+        terminating = true
+        if let preparation { _ = try? await preparation.value }
+        if let sessionPreparation { _ = try? await sessionPreparation.value }
+        // 仅为确认清理重连，不安装、不授权、不重新开放业务 gate。
+        if sessionConnection == nil && sessionLost { try await openSession(cleanup: true) }
+        guard let connection = sessionConnection else {
+            guard !sessionLost && !proxyPending && !tunPending else { throw LifecycleError.refused("后台会话失联，恢复未确认") }
+            return
+        }
+        do { try await sessionOperation(connection) { $0.endSession(self.nonce, withReply: $1) } }
+        catch {
+            // 超时也可能是已清理但回包丢失；下次仅重连确认，不沿用已结束的 endpoint。
+            sessionConnection = nil; sessionLost = true; connection.invalidate()
+            throw error
+        }
+        proxyPending = false; tunPending = false; sessionLost = false
+        sessionConnection = nil; connection.invalidate()
+    }
     private var helperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Library/HelperTools/SmartClashHelper") }
     private var resources: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources") }
     private var coreURLs: [(String, URL)] {
@@ -40,26 +126,49 @@ final class PrivilegedClient {
     }
 
     func prepare() async throws {
-        if let preparation { return try await preparation.value }
-        let task = Task { try await self.ensureAvailable() }
+        try checkGate()
+        if let preparation { try await preparation.value; try checkGate(); return }
+        let task = Task {
+            try self.checkGate()
+            try await self.ensureAvailable()
+            try self.checkGate()
+            try await self.openSession()
+        }
         preparation = task
         defer { preparation = nil }
         try await task.value
+        try checkGate()
     }
-    func setSystemProxy(_ snapshots: Data, enabled: Bool) async throws {
-        _ = try ProxySnapshot.decodeValidated(snapshots)
-        try await prepare()
-        try await operation { $0.setSystemProxy(snapshots, enabled: enabled, withReply: $1) }
+    func setSystemProxy(enabled: Bool) async throws {
+        if enabled { try await prepare(); try checkGate() }
+        guard let connection = sessionConnection else {
+            if !enabled && !proxyPending && !sessionLost { return }
+            throw LifecycleError.refused("后台会话不可用，代理恢复未确认")
+        }
+        if enabled { proxyPending = true }
+        try await sessionOperation(connection) { $0.setSystemProxy(self.nonce, port: Configuration.proxyPort, enabled: enabled, withReply: $1) }
+        if !enabled { proxyPending = false }
+        else { try checkGate() }
     }
     func startTun(_ configuration: Data, kernel: KernelKind) async throws {
-        try TunConfiguration.validate(configuration, kernel: kernel)
+        try checkGate()
+        try TunConfiguration.validate(configuration, kernel: kernel, port: Configuration.proxyPort)
         try await prepare()
-        try Task.checkCancellation()
-        try await operation { $0.startTun(configuration, kernel: kernel.rawValue, withReply: $1) }
+        try checkGate()
+        guard let connection = sessionConnection else { throw LifecycleError.refused("后台会话不可用") }
+        tunPending = true
+        try await sessionOperation(connection) {
+            $0.startTun(configuration, kernel: kernel.rawValue, port: Configuration.proxyPort, session: self.nonce, withReply: $1)
+        }
+        try checkGate()
     }
     func stopTun() async throws {
-        try await prepare()
-        try await operation { $0.stopTun(withReply: $1) }
+        guard let connection = sessionConnection else {
+            guard !tunPending && !sessionLost else { throw LifecycleError.refused("后台会话失联，TUN 恢复未确认") }
+            return
+        }
+        try await sessionOperation(connection) { $0.stopTun(self.nonce, withReply: $1) }
+        tunPending = false
     }
     private func identity() throws -> HelperInstallation {
         if let installation { return installation }
@@ -93,7 +202,9 @@ final class PrivilegedClient {
                 throw ProxyError.message("SmartClash 后台服务暂不可用。请检查系统设置中的后台运行权限，或重启电脑后重试")
             }
         }
+        try checkGate()
         try await install(expected)
+        try checkGate()
         var lastError: Error = ProxyError.message("后台服务安装后未能启动")
         for _ in 0..<10 {
             do {
@@ -148,11 +259,19 @@ final class PrivilegedClient {
         """
         try await Command.admin(script)
     }
-    private func operation(_ send: @escaping (PrivilegedXPC, @escaping (String?) -> Void) -> Void) async throws {
-        let _: Void = try await request(seconds: 120) { service, finish in
-            send(service) { error in
-                if let error { finish(.failure(ProxyError.message(error))) }
-                else { finish(.success(())) }
+    private func sessionOperation(_ connection: NSXPCConnection,
+                                  send: (PrivilegedXPC, @escaping (String?) -> Void) -> Void) async throws {
+        let id = UUID()
+        defer { sessionReplies[id] = nil }
+        let _: Void = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let reply = XPCReply(continuation, connection: connection, seconds: 120, invalidatesConnection: false)
+            sessionReplies[id] = (connection, { reply.finish(.failure($0)) })
+            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ reply.finish(.failure($0)) }) as? PrivilegedXPC else {
+                reply.finish(.failure(ProxyError.message("无法连接后台会话"))); return
+            }
+            send(proxy) { error in
+                if let error { reply.finish(.failure(ProxyError.message(error))) }
+                else { reply.finish(.success(())) }
             }
         }
     }

@@ -57,6 +57,8 @@ pub struct ProxyNode {
     pub name: String,
     pub source_id: String,
     pub payload: Map<String, Value>,
+    /// Original exit label; never serialized into a kernel configuration.
+    pub exit_name: String,
 }
 
 impl ProxyNode {
@@ -98,9 +100,9 @@ impl RoutingMode {
 
     pub fn explanation(self) -> &'static str {
         match self {
-            RoutingMode::LowLatency => "优先选择实测 HTTPS 延迟较低、出网正常的线路。",
-            RoutingMode::HighSpeed => "对最多 3 个候选各下载 1 MiB，按实测吞吐选择；每轮约消耗 3 MiB 测速流量。",
-            RoutingMode::Ai => "线路必须通过 OpenAI API 可达性检查；不代表 ChatGPT 网页登录或账号权限。",
+            RoutingMode::LowLatency => "自动选路优先非中国香港节点，同组按实测 HTTPS 延迟选择；无合适线路时回退。",
+            RoutingMode::HighSpeed => "优先非中国香港节点，按实测吞吐选择；每组最多测 3 个候选、各 1 MiB，含回退最多约 6 MiB。",
+            RoutingMode::Ai => "优先非中国香港节点，线路仍须通过 OpenAI API 可达性检查；不代表 ChatGPT 网页登录或账号权限。",
         }
     }
 }

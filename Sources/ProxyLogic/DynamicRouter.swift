@@ -40,7 +40,7 @@ public enum DynamicRouter {
                 let digest = SHA256.hash(data: Data(pathIDs.joined(separator: "/").utf8)).map { String(format: "%02x", $0) }.joined()
                 let name = "AUTO-\(digest.prefix(24))"
                 var payload = node.payload; payload["name"] = name; payload["dialer-proxy"] = previous
-                let item = ProxyNode(id: "auto-" + digest, name: name, sourceID: node.sourceID, payload: payload)
+                let item = ProxyNode(id: "auto-" + digest, name: name, sourceID: node.sourceID, payload: payload, exitName: node.exitName)
                 definitions[item.id] = item; previous = name; last = item
             }
             if let last, seen.insert(last.id).inserted { candidates.append(last) }

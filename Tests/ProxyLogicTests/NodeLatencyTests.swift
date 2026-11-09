@@ -38,6 +38,65 @@ final class NodeLatencyTests: XCTestCase {
         XCTAssertEqual(NodeRanking.connectionCandidates(pool, latencies: samples, now: now).first?.id, pool[2].id)
         XCTAssertFalse(NodeLatency(milliseconds: 1, checked: now.addingTimeInterval(10)).isFresh(now: now))
     }
+    private func regionNode(_ id: String, _ label: String, source: UUID = UUID()) -> ProxyNode {
+        ProxyNode(id: id, name: label, sourceID: source,
+            payload: ["name": label, "type": "ss", "server": "\(id).example.com", "port": 443,
+                "cipher": "aes-128-gcm", "password": "fixture"])
+    }
+    func testRecognizesHongKongLabelsWithoutMatchingOtherWords() {
+        for label in ["中国香港 01", "HK01", "[hK] 02", "HKG-03", "Hong Kong 04", "Hong-Kong",
+                      "HongKong", "\u{1f1ed}\u{1f1f0} 05", "专线 · HK 06"] {
+            XCTAssertTrue(NodeRanking.isHongKong(regionNode("n", label)), label)
+        }
+        for label in ["Tokyo", "Singapore", "US 01", "SHK-01", "HKT 02", "HKEX", "日本 · abcd12345678"] {
+            XCTAssertFalse(NodeRanking.isHongKong(regionNode("n", label)), label)
+        }
+    }
+    func testRegionPreferenceIsStableAndRetainsFallbacks() {
+        let pool = [regionNode("hk1", "HK01"), regionNode("jp", "JP01"),
+                    regionNode("hk2", "中国香港02"), regionNode("sg", "SG01")]
+        XCTAssertEqual(NodeRanking.preferNonHongKong(pool).map(\.id), ["jp", "sg", "hk1", "hk2"])
+        XCTAssertEqual(NodeRanking.preferNonHongKong([pool[0]]).map(\.id), ["hk1"])
+        XCTAssertTrue(NodeRanking.preferNonHongKong([]).isEmpty)
+    }
+    func testConnectionPreferenceOutranksFreshHongKongLatencyButNotListSort() {
+        let pool = [regionNode("hk", "HK01"), regionNode("jp", "JP01")]
+        let now = Date()
+        let samples = ["hk": NodeLatency(milliseconds: 5, checked: now)]
+        XCTAssertEqual(NodeRanking.connectionCandidates(pool, latencies: samples, now: now).map(\.id), ["jp", "hk"])
+        XCTAssertEqual(NodeRanking.sorted(pool, latencies: samples).map(\.id), ["hk", "jp"])
+    }
+    func testSourceRotationIsPreservedWithinRegionTiers() {
+        let a = UUID(), b = UUID()
+        let pool = [regionNode("hk1", "HK01", source: a), regionNode("jp", "JP01", source: a),
+                    regionNode("us", "US01", source: a), regionNode("hk2", "HK02", source: b),
+                    regionNode("sg", "SG01", source: b)]
+        XCTAssertEqual(NodeRanking.connectionCandidates(pool, latencies: [:]).map(\.id), ["jp", "sg", "us", "hk1", "hk2"])
+    }
+    func testRegionPreferenceUsesChainExitRatherThanEntry() throws {
+        let pool = [regionNode("hk", "HK01"), regionNode("jp", "JP01")]
+        var options = ChainOptions(); options.enabled = true
+        options.entryIDs = ["hk"]; options.exitIDs = ["jp"]
+        XCTAssertFalse(NodeRanking.isHongKong(try XCTUnwrap(ChainBuilder.routes(nodes: pool, options: options).first)))
+        options.entryIDs = ["jp"]; options.exitIDs = ["hk"]
+        XCTAssertTrue(NodeRanking.isHongKong(try XCTUnwrap(ChainBuilder.routes(nodes: pool, options: options).first)))
+    }
+    func testAnonymousAutoChainRetainsOriginalExitRegion() throws {
+        let pool = [regionNode("hk", "HK01"), regionNode("jp", "JP01")]
+        let hkPlan = try DynamicRouter.plan(nodes: pool, round: 0, budget: 2)
+        let jpPlan = try DynamicRouter.plan(nodes: pool, round: 1, budget: 2)
+        XCTAssertTrue(NodeRanking.isHongKong(try XCTUnwrap(hkPlan.candidates.first { $0.name.hasPrefix("AUTO-") })))
+        XCTAssertFalse(NodeRanking.isHongKong(try XCTUnwrap(jpPlan.candidates.first { $0.name.hasPrefix("AUTO-") })))
+    }
+    func testManualPreferredHongKongNodeIsNotOverridden() throws {
+        let pool = [regionNode("hk", "HK01"), regionNode("jp", "JP01")]
+        let data = try Configuration.make(nodes: pool, secret: "fixture", tun: false, preferredName: pool[0].name)
+        let config = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let groups = try XCTUnwrap(config["proxy-groups"] as? [[String: Any]])
+        XCTAssertEqual((groups.first?["proxies"] as? [String])?.first, "HK01")
+        let payloads = try XCTUnwrap(config["proxies"] as? [[String: Any]])
+        XCTAssertTrue(payloads.allSatisfy { $0["exitName"] == nil && $0["exit_name"] == nil })
+    }
     func testDelayPathEscapesTheEntireNodeNameAsOneSegment() throws {
         let name = "香港 / A?#% 中文"
         let path = DelayEndpoint.path(name: name)

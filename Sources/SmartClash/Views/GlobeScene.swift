@@ -58,7 +58,7 @@ final class GlobeScene: ObservableObject {
 
     func update(_ snapshot: GlobeSnapshot, animate: Bool) {
         guard previous != snapshot || animate != previousAnimation else { return }
-        let firstMarkers = previous.markers.isEmpty && !snapshot.markers.isEmpty
+        let selectionChanged = previous.selectedNodeID != snapshot.selectedNodeID || previous.selectedLocation != snapshot.selectedLocation
         previous = snapshot; previousAnimation = animate
         content.childNodes.forEach { $0.removeFromParentNode() }
         for marker in snapshot.markers {
@@ -96,7 +96,7 @@ final class GlobeScene: ObservableObject {
                 }
             }
         }
-        if firstMarkers, let active = snapshot.markers.first(where: { $0.active && $0.isNode }) { resetCamera(toward: active.location) }
+        if selectionChanged, let location = snapshot.selectedLocation, location.isValid { resetCamera(toward: location) }
     }
 
     private static func material(_ color: NSColor) -> SCNMaterial {

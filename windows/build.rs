@@ -23,6 +23,7 @@ fn main() {
     }
 
     embed_windows_resources();
+    pin_bundled_cores();
 }
 
 #[cfg(windows)]
@@ -66,3 +67,23 @@ fn embed_windows_resources() {
 
 #[cfg(not(windows))]
 fn embed_windows_resources() {}
+
+#[cfg(windows)]
+fn pin_bundled_cores() {
+    use sha2::{Digest, Sha256};
+    for (name, variable) in [
+        ("mihomo.exe", "SMARTCLASH_MIHOMO_HASH"),
+        ("sing-box.exe", "SMARTCLASH_SINGBOX_HASH"),
+        ("xray.exe", "SMARTCLASH_XRAY_HASH"),
+        ("wintun.dll", "SMARTCLASH_WINTUN_HASH"),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let data = std::fs::read(&path).expect("固定 bundled 内核资源必须存在");
+        println!("cargo:rustc-env={variable}={:x}", Sha256::digest(data));
+    }
+}
+#[cfg(not(windows))]
+fn pin_bundled_cores() {}

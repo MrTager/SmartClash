@@ -12,11 +12,12 @@ pub struct CmdOutput {
 }
 
 pub fn run(program: &Path, args: &[String]) -> std::io::Result<CmdOutput> {
-    let output = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .output()?;
+        .stdin(Stdio::null());
+    let output = crate::services::lifecycle::output(&mut command).map_err(std::io::Error::other)?;
     Ok(CmdOutput {
         code: output.status.code().unwrap_or(-1),
         text: String::from_utf8_lossy(&output.stdout).to_string(),

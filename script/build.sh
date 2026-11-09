@@ -18,6 +18,7 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$APP_BUNDLE/Contents/Library/HelperTools"
 cp "$BIN_DIR/SmartClash" "$APP_BUNDLE/Contents/MacOS/SmartClash"
 cp "$BIN_DIR/SmartClashHelper" "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashHelper"
+cp "$BIN_DIR/SmartClashGuardian" "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashGuardian"
 for RESOURCE_BUNDLE in "$BIN_DIR"/SmartClash_*.bundle; do
   [[ -d "$RESOURCE_BUNDLE" ]] || continue
   ditto "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/$(basename "$RESOURCE_BUNDLE")"
@@ -59,13 +60,16 @@ SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 if [[ "$SIGNING_IDENTITY" == '-' ]]; then
   codesign --force --sign - "$APP_BUNDLE/Contents/Resources/mihomo"
   codesign --force --options runtime --sign - "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashHelper"
+  codesign --force --options runtime --sign - "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashGuardian"
   codesign --force --options runtime --sign - "$APP_BUNDLE"
 else
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE/Contents/Resources/mihomo"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashHelper"
+  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashGuardian"
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 fi
 codesign --verify --deep --strict "$APP_BUNDLE"
 lipo "$APP_BUNDLE/Contents/MacOS/SmartClash" -verify_arch x86_64
 lipo "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashHelper" -verify_arch x86_64
+lipo "$APP_BUNDLE/Contents/Library/HelperTools/SmartClashGuardian" -verify_arch x86_64
 echo "已构建：$APP_BUNDLE"

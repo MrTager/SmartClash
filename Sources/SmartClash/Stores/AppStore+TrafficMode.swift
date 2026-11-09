@@ -3,6 +3,7 @@ import ProxyLogic
 
 extension AppStore {
     func changeTrafficMode(_ wanted: TrafficMode) async throws {
+        try checkLifecycle()
         guard wanted != trafficMode else { return }
         guard !recovery else { throw ProxyError.message("请先恢复上次网络设置") }
         let previous = trafficMode
@@ -23,6 +24,7 @@ extension AppStore {
             catch {
                 // Finish rollback even if a second click cancelled the first operation.
                 let restored = await Task { @MainActor in
+                    guard !self.terminating else { return false }
                     do { try await api.setTrafficMode(previous); return true }
                     catch { return false }
                 }.value
@@ -48,11 +50,11 @@ extension AppStore {
     }
 
     func startRuleSchedule() {
-        guard persistsChanges, rulesScheduleTask == nil else { return }
+        guard !terminating, persistsChanges, rulesScheduleTask == nil else { return }
         rulesScheduleTask = Task { [weak self] in
             var retryAfter = Date.distantPast
             while !Task.isCancelled {
-                guard let self else { return }
+                guard let self, !self.terminating else { return }
                 if Date() >= retryAfter && (self.ruleSnapshot?.isDue() ?? true) {
                     do { try await self.refreshRules(); retryAfter = .distantPast }
                     catch is CancellationError { return }
@@ -71,6 +73,7 @@ extension AppStore {
     }
 
     func ensureRulesReady() async throws {
+        try checkLifecycle()
         if ruleSnapshot == nil { try await refreshRules() }
         guard ruleSnapshot?.isComplete == true else { throw ProxyError.message("尚无完整规则，请先更新规则，或使用全局 / 直连模式") }
         if running && !rulesAppliedToCore && ruleProviderBaseURL != nil {
@@ -79,6 +82,7 @@ extension AppStore {
     }
 
     func refreshRules() async throws {
+        try checkLifecycle()
         if rulesUpdating {
             while rulesUpdating { try await Task.sleep(nanoseconds: 100_000_000) }
             guard ruleSnapshot != nil else { throw ProxyError.message("规则更新未完成，请稍后重试") }
@@ -92,10 +96,10 @@ extension AppStore {
         rulesRefreshTask = task
         do {
             let snapshot = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            try Task.checkCancellation()
+            try checkLifecycle()
             // Only publish once all three modules have downloaded and passed conversion.
             let data = try await Task.detached(priority: .utility) { try JSONEncoder().encode(snapshot) }.value
-            try Task.checkCancellation()
+            try checkLifecycle()
             try Files.write(data, to: Files.root.appendingPathComponent("routing-rules.json"))
             try aggregate.updateRules(snapshot)
             ruleSnapshot = snapshot

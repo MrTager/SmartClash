@@ -4,7 +4,9 @@ import ProxyLogic
 
 public enum HelperLocation {
     public static let label = "com.smartclash.helper"
-    public static let version = 2
+    public static let version = 3
+    public static let sessionDirectory = directory + "/Sessions"
+    public static let journal = sessionDirectory + "/active.json"
     public static let executable = "/Library/PrivilegedHelperTools/com.smartclash.helper"
     public static let directory = "/Library/Application Support/SmartClashHelper"
     public static let manifest = directory + "/installation.plist"
@@ -17,9 +19,13 @@ public enum HelperLocation {
 @objc(SmartClashPrivilegedXPC)
 public protocol PrivilegedXPC {
     func ping(withReply reply: @escaping (Int) -> Void)
-    func setSystemProxy(_ snapshots: Data, enabled: Bool, withReply reply: @escaping (String?) -> Void)
-    func startTun(_ configuration: Data, kernel: String, withReply reply: @escaping (String?) -> Void)
-    func stopTun(withReply reply: @escaping (String?) -> Void)
+    func beginSession(_ nonce: String, withReply reply: @escaping (String?) -> Void)
+    func heartbeat(_ nonce: String, withReply reply: @escaping (String?) -> Void)
+    func endSession(_ nonce: String, withReply reply: @escaping (String?) -> Void)
+    func status(_ nonce: String, withReply reply: @escaping (Data?, String?) -> Void)
+    func setSystemProxy(_ nonce: String, port: Int, enabled: Bool, withReply reply: @escaping (String?) -> Void)
+    func startTun(_ configuration: Data, kernel: String, port: Int, session: String, withReply reply: @escaping (String?) -> Void)
+    func stopTun(_ nonce: String, withReply reply: @escaping (String?) -> Void)
 }
 
 public struct HelperInstallation: Codable, Equatable {

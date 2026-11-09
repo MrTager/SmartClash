@@ -9,6 +9,8 @@ pub struct AggregateServer {
     token: String,
     payload: Arc<Mutex<Vec<u8>>>,
     started: Arc<Mutex<bool>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl AggregateServer {
@@ -17,11 +19,16 @@ impl AggregateServer {
             token: token.to_string(),
             payload: Arc::new(Mutex::new(Vec::new())),
             started: Arc::new(Mutex::new(false)),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker: Mutex::new(None),
         }
     }
 
     pub fn address(&self) -> String {
-        format!("http://127.0.0.1:{AGGREGATE_PORT}/{}/config.yaml", self.token)
+        format!(
+            "http://127.0.0.1:{AGGREGATE_PORT}/{}/config.yaml",
+            self.token
+        )
     }
 
     pub fn is_started(&self) -> bool {
@@ -40,26 +47,67 @@ impl AggregateServer {
         }
         let listener = TcpListener::bind(("127.0.0.1", AGGREGATE_PORT))
             .map_err(|_| format!("本机订阅端口 {AGGREGATE_PORT} 无法监听，请检查端口冲突"))?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         *self.started.lock().unwrap() = true;
+        self.stop.store(false, std::sync::atomic::Ordering::SeqCst);
         let payload = Arc::clone(&self.payload);
         let token = self.token.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let payload = Arc::clone(&payload);
-                let token = token.clone();
-                std::thread::spawn(move || handle(stream, &token, &payload));
+        let stop = Arc::clone(&self.stop);
+        *self.worker.lock().unwrap() = Some(std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if handlers.len() >= 16 {
+                            drop(stream);
+                        } else {
+                            let payload = Arc::clone(&payload);
+                            let token = token.clone();
+                            handlers
+                                .push(std::thread::spawn(move || handle(stream, &token, &payload)));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(30))
+                    }
+                    Err(_) => break,
+                }
+                let mut index = 0;
+                while index < handlers.len() {
+                    if handlers[index].is_finished() {
+                        let _ = handlers.swap_remove(index).join();
+                    } else {
+                        index += 1;
+                    }
+                }
             }
-        });
+            for handler in handlers {
+                let _ = handler.join();
+            }
+        }));
+        Ok(())
+    }
+    pub fn stop(&self) -> Result<(), String> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(worker) = self.worker.lock().unwrap().take() {
+            worker.join().map_err(|_| "聚合订阅服务退出失败")?;
+        }
+        *self.started.lock().unwrap() = false;
         Ok(())
     }
 }
 
 fn handle(mut stream: TcpStream, token: &str, payload: &Arc<Mutex<Vec<u8>>>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let mut request = Vec::new();
     let mut buffer = [0u8; 1024];
     loop {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(remaining));
         match stream.read(&mut buffer) {
             Ok(0) => return,
             Ok(n) => {

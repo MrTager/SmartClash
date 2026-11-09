@@ -94,6 +94,112 @@ final class ActivityAndStreamingTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 1)
     }
     @MainActor
+    func testGeolocationCandidatesPrioritizeExitBeforeEntryAndOldConnections() {
+        let entry = ProxyNode(id: "entry", name: "Entry", sourceID: UUID(), payload: ["server": "entry.example.test"])
+        let exit = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "exit.example.test"])
+        let old = ProxyNode(id: "old", name: "Old", sourceID: UUID(), payload: ["server": "old.example.test"])
+        let standby = ProxyNode(id: "standby", name: "Standby", sourceID: UUID(), payload: ["server": "standby.example.test"])
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        activity.configure(nodes: [standby, old, entry, exit], active: [entry, exit])
+        activity.ingest(ConnectionSnapshot(uploadTotal: 0, downloadTotal: 0, connections: [
+            CoreConnection(id: "old-request", metadata: ConnectionMetadata(destinationIP: "1.1.1.1"), chains: [old.name])
+        ]))
+        let date = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "exit.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "entry.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "old.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "1.1.1.1")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "standby.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: date))
+        XCTAssertFalse(activity.enabled)
+        XCTAssertFalse(activity.resolving)
+    }
+    @MainActor
+    func testPreferredGeolocationFailureRetriesAfterTenSeconds() {
+        let node = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "exit.example.test"])
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        activity.configure(nodes: [node], active: [node])
+        let date = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "exit.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(9)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(10)), "exit.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(19)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(20)), "exit.example.test")
+    }
+    @MainActor
+    func testNonpreferredGeolocationFailureKeepsFiveMinuteBackoff() {
+        let node = ProxyNode(id: "standby", name: "Standby", sourceID: UUID(), payload: ["server": "standby.example.test"])
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        activity.configure(nodes: [node], active: [])
+        let date = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "standby.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(299)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(300)), "standby.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(599)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(600)), "standby.example.test")
+    }
+    @MainActor
+    func testRouteChangeClearsOnlyCurrentServersBackoffOnce() {
+        let entry = ProxyNode(id: "entry", name: "Entry", sourceID: UUID(), payload: ["server": "entry.example.test"])
+        let a = ProxyNode(id: "A", name: "A", sourceID: UUID(), payload: ["server": "a.example.test"])
+        let b = ProxyNode(id: "B", name: "B", sourceID: UUID(), payload: ["server": "b.example.test"])
+        let standby = ProxyNode(id: "standby", name: "Standby", sourceID: UUID(), payload: ["server": "standby.example.test"])
+        let nodes = [entry, a, b, standby]
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        activity.configure(nodes: nodes, active: [entry, a])
+        let date = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "a.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "entry.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "b.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "standby.example.test")
+        activity.configure(nodes: nodes, active: [entry, a])
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(1)))
+
+        activity.configure(nodes: nodes, active: [entry, b])
+        let switched = date.addingTimeInterval(2)
+        XCTAssertEqual(activity.nextGeolocationHost(at: switched), "b.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: switched), "entry.example.test")
+        XCTAssertNil(activity.nextGeolocationHost(at: switched))
+        for _ in 0..<3 {
+            activity.configure(nodes: Array(nodes.reversed()), active: [entry, b])
+            XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(3)))
+        }
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(11)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(12)), "b.example.test")
+    }
+    @MainActor
+    func testSharedServerNodeIdentityChangeClearsBackoffButRepeatedConfigureDoesNot() {
+        let a = ProxyNode(id: "A", name: "A", sourceID: UUID(), payload: ["server": "shared.example.test"])
+        let b = ProxyNode(id: "B", name: "B", sourceID: UUID(), payload: ["server": "shared.example.test"])
+        let nodes = [a, b]
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        let date = Date(timeIntervalSince1970: 1_000)
+        activity.configure(nodes: nodes, active: [a])
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "shared.example.test")
+        activity.configure(nodes: nodes, active: [a])
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(1)))
+        activity.configure(nodes: nodes, active: [b])
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(2)), "shared.example.test")
+        activity.configure(nodes: nodes, active: [b])
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(3)))
+    }
+    @MainActor
+    func testServerChangeForSameNodeAndLeavingPreferredRouteUpdateBackoff() {
+        let original = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "old.example.test"])
+        let updated = ProxyNode(id: original.id, name: original.name, sourceID: original.sourceID, payload: ["server": "new.example.test"])
+        let activity = NetworkActivityStore(geo: GeoIPService(cacheURL: nil))
+        let date = Date(timeIntervalSince1970: 1_000)
+        activity.configure(nodes: [original, updated], active: [original])
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "old.example.test")
+        XCTAssertEqual(activity.nextGeolocationHost(at: date), "new.example.test")
+        activity.configure(nodes: [updated], active: [updated])
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(1)), "new.example.test")
+        activity.configure(nodes: [updated], active: [])
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(11)))
+        XCTAssertNil(activity.nextGeolocationHost(at: date.addingTimeInterval(300)))
+        XCTAssertEqual(activity.nextGeolocationHost(at: date.addingTimeInterval(301)), "new.example.test")
+    }
+    @MainActor
     func testLegacyPreferencesDefaultToLowLatency() throws {
         let preferences = try JSONDecoder().decode(Preferences.self, from: Data("{\"sources\":[],\"interval\":60,\"automatic\":true,\"secret\":\"test\",\"subscriptionToken\":\"test\"}".utf8))
         XCTAssertEqual(preferences.routingMode ?? .lowLatency, .lowLatency)

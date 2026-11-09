@@ -51,6 +51,7 @@ impl ChainBuilder {
                     id,
                     name,
                     source_id: exit.source_id.clone(),
+                    exit_name: exit.exit_name.clone(),
                     payload,
                 });
             }

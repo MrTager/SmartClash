@@ -3,6 +3,7 @@
 
 use super::widgets::{self, hint};
 use super::ViewState;
+use crate::logic::chain::ChainTrace;
 use crate::logic::model::{CoreConnection, GeoLocation, ProxyNode};
 use crate::state::Store;
 use egui::{Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -53,6 +54,8 @@ struct Snapshot {
     routes: Vec<Route>,
     mapped_nodes: usize,
     mapped_connections: usize,
+    selected_node_id: Option<String>,
+    selected_location: Option<(f32, f32)>,
 }
 
 fn node_server(node: &ProxyNode) -> Option<String> {
@@ -64,18 +67,15 @@ fn node_server(node: &ProxyNode) -> Option<String> {
 }
 
 fn build_snapshot(
-    store: &Store,
+    nodes: &[ProxyNode],
+    trace: &ChainTrace,
     connections: &[CoreConnection],
     locations: &HashMap<String, GeoLocation>,
     focused: Option<&str>,
 ) -> Snapshot {
     let mut markers: Vec<Marker> = Vec::new();
-    let active_ids: std::collections::HashSet<&String> = store
-        .active_trace
-        .hops
-        .iter()
-        .map(|hop| &hop.id)
-        .collect();
+    let active_ids: std::collections::HashSet<&String> =
+        trace.hops.iter().map(|hop| &hop.id).collect();
 
     let insert_marker = |markers: &mut Vec<Marker>, marker: Marker| {
         if let Some(existing) = markers.iter_mut().find(|m| m.id == marker.id) {
@@ -87,9 +87,26 @@ fn build_snapshot(
         }
     };
 
-    for node in &store.nodes {
-        let Some(server) = node_server(node) else { continue };
-        let Some(location) = locations.get(&server) else { continue };
+    // 精确跟随完整链路末跳；位置未知时不回退入口或旧的活跃标记。
+    let selected_node = trace
+        .complete
+        .then(|| trace.hops.last())
+        .flatten()
+        .and_then(|hop| nodes.iter().find(|node| node.id == hop.id));
+    let selected_node_id = selected_node.map(|node| node.id.clone());
+    let selected_location = selected_node
+        .and_then(node_server)
+        .and_then(|server| locations.get(&server))
+        .filter(|location| location.is_valid())
+        .map(|location| (location.latitude as f32, location.longitude as f32));
+
+    for node in nodes {
+        let Some(server) = node_server(node) else {
+            continue;
+        };
+        let Some(location) = locations.get(&server) else {
+            continue;
+        };
         insert_marker(
             &mut markers,
             Marker {
@@ -103,32 +120,27 @@ fn build_snapshot(
     }
     let mapped_nodes = markers.len();
 
-    let all_nodes = store.node_list_nodes();
-    let index: HashMap<String, &ProxyNode> = all_nodes
-        .iter()
-        .map(|node| (node.name.clone(), node))
-        .collect();
+    let index: HashMap<String, &ProxyNode> =
+        nodes.iter().map(|node| (node.name.clone(), node)).collect();
 
     let mut routes: Vec<Route> = Vec::new();
     let mut mapped_connections = 0usize;
 
     // 当前链路（选中出口的完整路径）。
-    let current: Vec<(f32, f32)> = store
-        .active_trace
+    let current: Vec<(f32, f32)> = trace
         .hops
         .iter()
         .filter_map(|hop| {
-            let server = all_nodes
+            let server = nodes
                 .iter()
                 .find(|node| node.id == hop.id)
                 .and_then(|node| node_server(node))?;
-            locations.get(&server).map(|l| (l.latitude as f32, l.longitude as f32))
+            locations
+                .get(&server)
+                .map(|l| (l.latitude as f32, l.longitude as f32))
         })
         .collect();
-    if current.len() > 1
-        && current.len() == store.active_trace.hops.len()
-        && store.active_trace.complete
-    {
+    if current.len() > 1 && current.len() == trace.hops.len() && trace.complete {
         routes.push(Route {
             locations: current,
             selected: true,
@@ -141,15 +153,21 @@ fn build_snapshot(
     ordered.sort_by_key(|c| if Some(c.id.as_str()) == focused { 0 } else { 1 });
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for connection in ordered {
-        let Some(key) = connection.metadata.geolocation_key() else { continue };
-        let Some(destination) = locations.get(&key) else { continue };
+        let Some(key) = connection.metadata.geolocation_key() else {
+            continue;
+        };
+        let Some(destination) = locations.get(&key) else {
+            continue;
+        };
         let path = connection.route_nodes(&index);
         if path.is_empty() {
             continue;
         }
         let mut hops: Vec<(f32, f32)> = Vec::new();
         for node in &path {
-            let Some(server) = node_server(node) else { break };
+            let Some(server) = node_server(node) else {
+                break;
+            };
             match locations.get(&server) {
                 Some(l) => hops.push((l.latitude as f32, l.longitude as f32)),
                 None => break,
@@ -172,7 +190,10 @@ fn build_snapshot(
         hops.push((destination.latitude as f32, destination.longitude as f32));
         let route_key = format!(
             "{}:{key}",
-            path.iter().map(|n| n.id.clone()).collect::<Vec<_>>().join("/")
+            path.iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>()
+                .join("/")
         );
         if seen.insert(route_key) && routes.len() < 48 {
             routes.push(Route {
@@ -189,6 +210,26 @@ fn build_snapshot(
         routes,
         mapped_nodes,
         mapped_connections,
+        selected_node_id,
+        selected_location,
+    }
+}
+
+/// 仅出口身份/位置改变时跟随；连接轮询不能覆盖用户的手动视角。
+fn follow_selection(view: &mut ViewState, snapshot: &Snapshot, trace: &ChainTrace) {
+    let route_ids: Vec<String> = trace.hops.iter().map(|hop| hop.id.clone()).collect();
+    if view.globe_route_ids != route_ids {
+        view.focused_connection = None;
+        view.globe_route_ids = route_ids;
+    }
+    let changed = view.globe_selected_node != snapshot.selected_node_id
+        || view.globe_selected_location != snapshot.selected_location;
+    view.globe_selected_node = snapshot.selected_node_id.clone();
+    view.globe_selected_location = snapshot.selected_location;
+    if changed {
+        if let Some(location) = snapshot.selected_location {
+            reset_camera(view, Some(location));
+        }
     }
 }
 
@@ -199,12 +240,29 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         .activity
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let route_ids: Vec<String> = store
+        .active_trace
+        .hops
+        .iter()
+        .map(|hop| hop.id.clone())
+        .collect();
+    if view.globe_route_ids != route_ids
+        || view
+            .focused_connection
+            .as_ref()
+            .is_some_and(|id| !activity.connections.iter().any(|c| &c.id == id))
+    {
+        view.focused_connection = None;
+    }
+    let nodes = store.visualization_nodes();
     let snapshot = build_snapshot(
-        store,
+        &nodes,
+        &store.active_trace,
         &activity.connections,
         &activity.locations,
         view.focused_connection.as_deref(),
     );
+    follow_selection(view, &snapshot, &store.active_trace);
 
     widgets::card(ui, None, |ui| {
         // ---- 头部：全球连接 + 实时状态（对应 NetworkGlobePanel 头部） ----
@@ -219,7 +277,10 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
                 let (color, text) = if !activity.supported {
                     (widgets::MUTED, "当前内核不提供实时连接".to_string())
                 } else if activity.connected {
-                    (widgets::GOOD, format!("实时 · {} 个连接", activity.connections.len()))
+                    (
+                        widgets::GOOD,
+                        format!("实时 · {} 个连接", activity.connections.len()),
+                    )
                 } else if store.running {
                     (widgets::MUTED, "正在连接内核…".to_string())
                 } else {
@@ -234,7 +295,8 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         // ---- 深色地球区域 ----
         let width = ui.available_width().max(280.0);
         let height = 330.0_f32.min(width * 0.62).max(250.0);
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
 
         // 拖动旋转（0.008 rad/px，与 macOS rotateCamera 一致）。
         // egui 的 delta.y 向下为正，向下拖 = 相机纬度升高。
@@ -247,8 +309,8 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         if response.hovered() {
             let scroll = ui.input(|input| input.raw_scroll_delta.y);
             if scroll != 0.0 {
-                view.globe_distance =
-                    (view.globe_distance * (-scroll * 0.0012).exp()).clamp(MIN_DISTANCE, MAX_DISTANCE);
+                view.globe_distance = (view.globe_distance * (-scroll * 0.0012).exp())
+                    .clamp(MIN_DISTANCE, MAX_DISTANCE);
             }
         }
         if view.globe_yaw > 180.0 {
@@ -256,18 +318,6 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         } else if view.globe_yaw < -180.0 {
             view.globe_yaw += 360.0;
         }
-
-        // 首次出现标记时，镜头对准当前出口（对应 firstMarkers 逻辑）。
-        if !snapshot.markers.is_empty() && !view.globe_had_markers {
-            if let Some(active) = snapshot
-                .markers
-                .iter()
-                .find(|marker| marker.active && marker.is_node)
-            {
-                reset_camera(view, Some((active.lat, active.lon)));
-            }
-        }
-        view.globe_had_markers = !snapshot.markers.is_empty();
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, egui::Rounding::same(12.0), SCENE_BG);
@@ -299,8 +349,13 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         for route in &snapshot.routes {
             let color = if route.selected { CYAN } else { ORANGE };
             let alpha = if route.highlighted { 242 } else { 51 };
-            let stroke_color = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
-            let width = if route.selected { (radius * 0.008).max(2.0) } else { (radius * 0.005).max(1.1) };
+            let stroke_color =
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+            let width = if route.selected {
+                (radius * 0.008).max(2.0)
+            } else {
+                (radius * 0.005).max(1.1)
+            };
             let duration = if route.selected { 3.0 } else { 2.4 };
             for window in route.locations.windows(2) {
                 let points = arc_points(window[0], window[1]);
@@ -310,7 +365,8 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
                     let (position, visible) = project_vec(lifted, center, radius, pitch, yaw);
                     if let Some((last, last_visible)) = previous {
                         if visible > 0.02 && last_visible > 0.02 {
-                            painter.line_segment([last, position], Stroke::new(width, stroke_color));
+                            painter
+                                .line_segment([last, position], Stroke::new(width, stroke_color));
                         }
                     }
                     previous = Some((position, visible));
@@ -332,12 +388,22 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         for marker in &snapshot.markers {
             let scale = if marker.is_node { 1.012 } else { 1.012 };
             let (x, y, z) = unit_vector(marker.lat, marker.lon);
-            let (position, visible) = project_vec((x * scale, y * scale, z * scale), center, radius, pitch, yaw);
+            let (position, visible) = project_vec(
+                (x * scale, y * scale, z * scale),
+                center,
+                radius,
+                pitch,
+                yaw,
+            );
             if visible <= 0.02 {
                 continue;
             }
             let color = if marker.is_node {
-                if marker.active { CYAN } else { TEAL }
+                if marker.active {
+                    CYAN
+                } else {
+                    TEAL
+                }
             } else {
                 ORANGE
             };
@@ -367,7 +433,13 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
         cursor = paint_line(&painter, cursor, &trace_text, FontId::monospace(12.0), CYAN);
         if let Some(last) = store.active_trace.hops.last() {
             let title = last.name.split(" · ").next().unwrap_or(&last.name);
-            cursor = paint_line(&painter, cursor, title, FontId::proportional(15.0), Color32::WHITE);
+            cursor = paint_line(
+                &painter,
+                cursor,
+                title,
+                FontId::proportional(15.0),
+                Color32::WHITE,
+            );
         }
         cursor = paint_line(
             &painter,
@@ -379,15 +451,34 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
             FontId::proportional(12.0),
             white(166),
         );
-        if activity.resolving {
-            paint_line(&painter, cursor, "正在解析 IP 位置…", FontId::proportional(10.5), white(128));
+        if !store.active_trace.hops.is_empty() && snapshot.selected_location.is_none() {
+            paint_line(
+                &painter,
+                cursor,
+                "当前节点位置待解析",
+                FontId::proportional(10.5),
+                white(166),
+            );
+        } else if activity.resolving {
+            paint_line(
+                &painter,
+                cursor,
+                "正在解析 IP 位置…",
+                FontId::proportional(10.5),
+                white(128),
+            );
         }
 
         // 底部图例。
         let legend_y = rect.max.y - 26.0;
         let mut legend_x = rect.min.x + pad;
         legend_x = paint_legend(&painter, Pos2::new(legend_x, legend_y), CYAN, "代理节点") + 16.0;
-        paint_legend(&painter, Pos2::new(legend_x, legend_y), ORANGE, "请求目标 / 流向");
+        paint_legend(
+            &painter,
+            Pos2::new(legend_x, legend_y),
+            ORANGE,
+            "请求目标 / 流向",
+        );
 
         // 未连接时底部居中提示。
         if !activity.enabled {
@@ -396,11 +487,8 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
             } else {
                 "当前内核不提供实时连接视图"
             };
-            let galley = painter.layout_no_wrap(
-                overlay.into(),
-                FontId::proportional(12.0),
-                white(166),
-            );
+            let galley =
+                painter.layout_no_wrap(overlay.into(), FontId::proportional(12.0), white(166));
             let start = Pos2::new(
                 center.x - galley.size().x / 2.0,
                 rect.max.y - 49.0 - galley.size().y,
@@ -410,45 +498,43 @@ pub fn draw(store: &Store, ui: &mut Ui, view: &mut ViewState) {
 
         // 有动画元素时持续重绘。
         if !snapshot.routes.is_empty() || activity.resolving {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(60));
         }
 
         // 右下角“回到当前节点”按钮。
         let button_size = egui::vec2(110.0, 22.0);
         let button_rect = Rect::from_min_size(
-            Pos2::new(rect.max.x - pad - button_size.x, rect.max.y - 12.0 - button_size.y),
+            Pos2::new(
+                rect.max.x - pad - button_size.x,
+                rect.max.y - 12.0 - button_size.y,
+            ),
             button_size,
         );
-        let reset = ui.allocate_new_ui(
-            egui::UiBuilder::new().max_rect(button_rect),
-            |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Button::new(
-                            RichText::new("◎ 回到当前节点").size(11.5).color(white(217)),
-                        )
+        let reset = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled(
+                    snapshot.selected_location.is_some(),
+                    egui::Button::new(RichText::new("◎ 回到当前节点").size(11.5).color(white(217)))
                         .fill(Color32::TRANSPARENT)
                         .stroke(Stroke::NONE),
-                    )
-                    .clicked()
-                })
-                .inner
-            },
-        );
+                )
+                .clicked()
+            })
+            .inner
+        });
         if reset.inner {
-            let target = snapshot
-                .markers
-                .iter()
-                .find(|marker| marker.active && marker.is_node)
-                .map(|marker| (marker.lat, marker.lon));
-            reset_camera(view, target);
+            reset_camera(view, snapshot.selected_location);
         }
     });
 
     // ---- 底部操作行 ----
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        hint(ui, "拖动旋转 · 滚轮缩放 · IP 位置为近似值，缺失时按本机 DNS 估算");
+        hint(
+            ui,
+            "拖动旋转 · 滚轮缩放 · 节点服务器 IP 为近似位置，非实际出网 IP",
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::new(
@@ -532,7 +618,9 @@ fn draw_connections(
             if view.focused_connection.is_some()
                 && ui
                     .add(egui::Button::new(
-                        RichText::new("显示全部连线").size(12.0).color(widgets::ACCENT),
+                        RichText::new("显示全部连线")
+                            .size(12.0)
+                            .color(widgets::ACCENT),
                     ))
                     .clicked()
             {
@@ -542,17 +630,21 @@ fn draw_connections(
     });
     ui.add_space(6.0);
 
-    let listed_nodes = store.node_list_nodes();
+    let listed_nodes = store.visualization_nodes();
     let index: HashMap<String, &ProxyNode> = listed_nodes
         .iter()
         .map(|node| (node.name.clone(), node))
         .collect();
     let row_height = 46.0;
-    let visible = (activity.connections.len() * 65).min(230).max(row_height as usize) as f32;
+    let visible = (activity.connections.len() * 65)
+        .min(230)
+        .max(row_height as usize) as f32;
     let shown: Vec<&CoreConnection> = activity.connections.iter().take(80).collect();
-    egui::ScrollArea::vertical()
-        .max_height(visible)
-        .show_rows(ui, row_height, shown.len(), |ui, range| {
+    egui::ScrollArea::vertical().max_height(visible).show_rows(
+        ui,
+        row_height,
+        shown.len(),
+        |ui, range| {
             for connection in &shown[range] {
                 let focused = view.focused_connection.as_deref() == Some(connection.id.as_str());
                 let frame = if focused {
@@ -598,7 +690,8 @@ fn draw_connections(
                 }
                 ui.separator();
             }
-        });
+        },
+    );
     if activity.connections.len() > 80 {
         hint(ui, "显示流量最高的 80 个连接");
     }
@@ -615,11 +708,11 @@ fn connection_row(
             .metadata
             .geolocation_key()
             .and_then(|key| locations.get(&key));
-        ui.label(
-            RichText::new("●")
-                .size(9.0)
-                .color(if located.is_some() { ORANGE } else { widgets::MUTED }),
-        );
+        ui.label(RichText::new("●").size(9.0).color(if located.is_some() {
+            ORANGE
+        } else {
+            widgets::MUTED
+        }));
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(connection.metadata.display_destination())
@@ -651,7 +744,11 @@ fn connection_row(
                             )
                         })
                         .unwrap_or_else(|| "位置未解析".into());
-                    ui.label(RichText::new(location_text).size(11.0).color(widgets::MUTED));
+                    ui.label(
+                        RichText::new(location_text)
+                            .size(11.0)
+                            .color(widgets::MUTED),
+                    );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     ui.label(
@@ -729,10 +826,7 @@ fn project_vec(
     // 绕 X 轴旋转 pitch。
     let y_up = cos_p * vy - sin_p * vz;
     let z_view = sin_p * vy + cos_p * vz;
-    (
-        center + Vec2::new(vx, -y_up) * radius,
-        z_view,
-    )
+    (center + Vec2::new(vx, -y_up) * radius, z_view)
 }
 
 // ---- 陆地掩码与球体纹理（对应 earthTexture()） ------------------------------
@@ -784,7 +878,8 @@ fn build_mask() -> Vec<u8> {
             let mut index = 0;
             while index + 1 < crossings.len() {
                 let start = ((crossings[index] + 180.0) / 360.0 * MASK_WIDTH as f32).floor() as i32;
-                let end = ((crossings[index + 1] + 180.0) / 360.0 * MASK_WIDTH as f32).ceil() as i32;
+                let end =
+                    ((crossings[index + 1] + 180.0) / 360.0 * MASK_WIDTH as f32).ceil() as i32;
                 for x in start.max(0)..end.min(MASK_WIDTH as i32) {
                     mask[y * MASK_WIDTH + x as usize] = 1;
                 }
@@ -795,7 +890,13 @@ fn build_mask() -> Vec<u8> {
     mask
 }
 
-fn globe_texture(ui: &Ui, view: &mut ViewState, yaw: f32, pitch: f32, size: usize) -> egui::TextureHandle {
+fn globe_texture(
+    ui: &Ui,
+    view: &mut ViewState,
+    yaw: f32,
+    pitch: f32,
+    size: usize,
+) -> egui::TextureHandle {
     let key = (yaw, pitch, size as u32);
     if let Some(texture) = &view.globe_texture {
         if view.globe_texture_key == key {
@@ -888,6 +989,214 @@ fn render_globe(yaw: f32, pitch: f32, size: usize) -> egui::ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(id: &str, server: &str) -> ProxyNode {
+        ProxyNode {
+            id: id.into(),
+            name: id.into(),
+            source_id: "fixture".into(),
+            payload: serde_json::json!({"server": server})
+                .as_object()
+                .unwrap()
+                .clone(),
+            exit_name: String::new(),
+        }
+    }
+
+    fn location(lat: f64, lon: f64) -> GeoLocation {
+        GeoLocation {
+            latitude: lat,
+            longitude: lon,
+            country: "Fixture".into(),
+            city: String::new(),
+        }
+    }
+
+    fn trace(nodes: &[ProxyNode], selected: &str) -> ChainTrace {
+        ChainTrace::resolve(selected, nodes, &[])
+    }
+
+    #[test]
+    fn switching_exit_updates_markers_and_camera() {
+        let nodes = vec![node("A", "a.test"), node("B", "b.test")];
+        let locations = HashMap::from([
+            ("a.test".into(), location(35.0, 139.0)),
+            ("b.test".into(), location(1.0, 103.0)),
+        ]);
+        let mut view = ViewState::default();
+        let first_trace = trace(&nodes, "A");
+        let first = build_snapshot(&nodes, &first_trace, &[], &locations, None);
+        follow_selection(&mut view, &first, &first_trace);
+        assert_eq!((view.globe_pitch, view.globe_yaw), (35.0, 139.0));
+        view.focused_connection = Some("old".into());
+        let next_trace = trace(&nodes, "B");
+        let next = build_snapshot(&nodes, &next_trace, &[], &locations, None);
+        follow_selection(&mut view, &next, &next_trace);
+        assert_eq!(next.selected_node_id.as_deref(), Some("B"));
+        assert_eq!(
+            next.markers
+                .iter()
+                .filter(|m| m.active)
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["node:b.test"]
+        );
+        assert_eq!((view.globe_pitch, view.globe_yaw), (1.0, 103.0));
+        assert_eq!(next.mapped_nodes, 2);
+        assert!(view.focused_connection.is_none());
+    }
+
+    #[test]
+    fn multihop_follows_generated_exit_not_first_marker() {
+        let entry = node("entry", "a-entry.test");
+        let mut exit = node("generated-exit", "z-exit.test");
+        exit.payload
+            .insert("dialer-proxy".into(), serde_json::json!(entry.name));
+        let nodes = vec![entry, exit];
+        let trace = trace(&nodes, "generated-exit");
+        let locations = HashMap::from([
+            ("a-entry.test".into(), location(35.0, 139.0)),
+            ("z-exit.test".into(), location(1.0, 103.0)),
+        ]);
+        let snapshot = build_snapshot(&nodes, &trace, &[], &locations, None);
+        assert!(snapshot.markers.first().unwrap().active);
+        assert_eq!(snapshot.selected_location, Some((1.0, 103.0)));
+        assert_eq!(snapshot.selected_node_id.as_deref(), Some("generated-exit"));
+        assert_eq!(snapshot.routes[0].locations, [(35.0, 139.0), (1.0, 103.0)]);
+        let mut view = ViewState::default();
+        follow_selection(&mut view, &snapshot, &trace);
+        assert_eq!((view.globe_pitch, view.globe_yaw), (1.0, 103.0));
+    }
+
+    #[test]
+    fn pending_exit_does_not_fall_back_and_late_location_follows() {
+        let nodes = vec![node("A", "a.test"), node("B", "b.test")];
+        let mut locations = HashMap::from([("a.test".into(), location(35.0, 139.0))]);
+        let mut view = ViewState::default();
+        let a_trace = trace(&nodes, "A");
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &a_trace, &[], &locations, None),
+            &a_trace,
+        );
+        view.globe_yaw = -10.0;
+        let b_trace = trace(&nodes, "B");
+        let pending = build_snapshot(&nodes, &b_trace, &[], &locations, None);
+        assert_eq!(pending.selected_node_id.as_deref(), Some("B"));
+        assert!(pending.selected_location.is_none());
+        assert!(pending.markers.iter().all(|m| !m.active));
+        follow_selection(&mut view, &pending, &b_trace);
+        assert_eq!(view.globe_yaw, -10.0);
+        locations.insert("b.test".into(), location(1.0, 103.0));
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &b_trace, &[], &locations, None),
+            &b_trace,
+        );
+        assert_eq!((view.globe_pitch, view.globe_yaw), (1.0, 103.0));
+        // An older request completing after B cannot steal focus back to A.
+        locations.insert("a.test".into(), location(40.0, 140.0));
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &b_trace, &[], &locations, None),
+            &b_trace,
+        );
+        assert_eq!((view.globe_pitch, view.globe_yaw), (1.0, 103.0));
+    }
+
+    #[test]
+    fn polling_same_exit_preserves_manual_rotation_and_zoom() {
+        let nodes = vec![node("A", "a.test")];
+        let trace = trace(&nodes, "A");
+        let locations = HashMap::from([
+            ("a.test".into(), location(35.0, 139.0)),
+            ("1.1.1.1".into(), location(-27.0, 153.0)),
+        ]);
+        let snapshot = build_snapshot(&nodes, &trace, &[], &locations, None);
+        let mut view = ViewState::default();
+        follow_selection(&mut view, &snapshot, &trace);
+        view.globe_pitch = -20.0;
+        view.globe_yaw = -30.0;
+        view.globe_distance = 6.0;
+        let connection = CoreConnection {
+            id: "request".into(),
+            chains: vec!["A".into()],
+            metadata: crate::logic::model::ConnectionMetadata {
+                destination_ip: Some("1.1.1.1".into()),
+                ..Default::default()
+            },
+            upload: 0,
+            download: 0,
+            rule: None,
+        };
+        let polled = build_snapshot(&nodes, &trace, &[connection], &locations, Some("request"));
+        assert_eq!(polled.mapped_connections, 1);
+        follow_selection(&mut view, &polled, &trace);
+        assert_eq!(
+            (view.globe_pitch, view.globe_yaw, view.globe_distance),
+            (-20.0, -30.0, 6.0)
+        );
+    }
+
+    #[test]
+    fn switching_ids_on_shared_server_still_follows() {
+        let nodes = vec![node("A", "shared.test"), node("B", "shared.test")];
+        let locations = HashMap::from([("shared.test".into(), location(35.0, 139.0))]);
+        let mut view = ViewState::default();
+        let a_trace = trace(&nodes, "A");
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &a_trace, &[], &locations, None),
+            &a_trace,
+        );
+        view.globe_yaw = -50.0;
+        let b_trace = trace(&nodes, "B");
+        let next = build_snapshot(&nodes, &b_trace, &[], &locations, None);
+        assert_eq!(next.markers.len(), 1);
+        follow_selection(&mut view, &next, &b_trace);
+        assert_eq!(view.globe_yaw, 139.0);
+        assert_eq!(view.globe_selected_node.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn unknown_incomplete_and_invalid_exits_never_offer_focus() {
+        let nodes = vec![node("A", "a.test")];
+        let valid_trace = trace(&nodes, "A");
+        let locations = HashMap::from([("a.test".into(), location(91.0, 139.0))]);
+        let invalid = build_snapshot(&nodes, &valid_trace, &[], &locations, None);
+        assert!(invalid.selected_location.is_none());
+        let incomplete = ChainTrace {
+            hops: valid_trace.hops.clone(),
+            complete: false,
+        };
+        let snapshot = build_snapshot(&nodes, &incomplete, &[], &locations, None);
+        assert!(snapshot.selected_node_id.is_none());
+        assert!(snapshot.selected_location.is_none());
+        let unknown = build_snapshot(&[], &valid_trace, &[], &locations, None);
+        assert!(unknown.selected_node_id.is_none());
+        assert!(unknown.selected_location.is_none());
+    }
+
+    #[test]
+    fn changed_coordinates_for_same_exit_refocus_camera() {
+        let nodes = vec![node("A", "a.test")];
+        let trace = trace(&nodes, "A");
+        let mut locations = HashMap::from([("a.test".into(), location(35.0, 139.0))]);
+        let mut view = ViewState::default();
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &trace, &[], &locations, None),
+            &trace,
+        );
+        view.globe_yaw = -40.0;
+        locations.insert("a.test".into(), location(1.0, 103.0));
+        follow_selection(
+            &mut view,
+            &build_snapshot(&nodes, &trace, &[], &locations, None),
+            &trace,
+        );
+        assert_eq!((view.globe_pitch, view.globe_yaw), (1.0, 103.0));
+    }
 
     #[test]
     fn land_data_is_readable() {

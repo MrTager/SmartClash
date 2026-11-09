@@ -37,6 +37,9 @@ impl CoreClient {
         body: Option<String>,
         timeout_secs: u64,
     ) -> Result<(u16, Value), String> {
+        if !crate::services::workers::valid() {
+            return Err("过期后台操作已取消".into());
+        }
         let url = format!("http://127.0.0.1:{CONTROLLER_PORT}{path}");
         let mut args: Vec<String> = vec![
             "-s".into(),
@@ -67,11 +70,20 @@ impl CoreClient {
             Some((text, status)) => (text, status.trim().parse::<u16>().unwrap_or(0)),
             None => (result.text.as_str(), 0),
         };
-        Ok((status, serde_json::from_str::<Value>(text).unwrap_or(Value::Null)))
+        Ok((
+            status,
+            serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+        ))
     }
 
     /// 与 `request` 相同，但把 4xx/5xx 也视为失败。
-    fn api(&self, path: &str, method: &str, body: Option<String>, timeout_secs: u64) -> Result<Value, String> {
+    fn api(
+        &self,
+        path: &str,
+        method: &str,
+        body: Option<String>,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
         let (status, value) = self.request(path, method, body, timeout_secs)?;
         if (200..300).contains(&status) {
             Ok(value)
@@ -171,10 +183,8 @@ impl CoreClient {
         // Windows 命令行上限约 32K 字符，完整配置通常远超该值；
         // 写临时文件后让内核按路径读取，避免 CreateProcess 直接失败。
         let sequence = RELOAD_SEQ.fetch_add(1, Ordering::SeqCst);
-        let temp = paths::data_root().join(format!(
-            "reload-{}-{sequence}.json",
-            std::process::id()
-        ));
+        let temp =
+            paths::data_root().join(format!("reload-{}-{sequence}.json", std::process::id()));
         paths::write_private(&temp, payload.as_bytes())?;
         let result = self.reload_config_path(&temp.display().to_string());
         let _ = std::fs::remove_file(&temp);
@@ -328,7 +338,8 @@ impl CoreClient {
             return Err("Xray 内核不支持流量事件流".into());
         }
         let url = format!("http://127.0.0.1:{CONTROLLER_PORT}/traffic");
-        Command::new(paths::curl_binary())
+        let mut command = Command::new(paths::curl_binary());
+        command
             .args([
                 "-s",
                 "-N",
@@ -342,9 +353,9 @@ impl CoreClient {
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("无法读取内核流量统计：{e}"))
+            .stderr(Stdio::null());
+        crate::services::lifecycle::spawn_child(&mut command)
+            .map_err(|e| format!("无法读取受控内核流量统计：{e}"))
     }
 }
 

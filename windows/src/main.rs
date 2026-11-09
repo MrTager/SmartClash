@@ -11,6 +11,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn main() -> eframe::Result<()> {
+    if services::lifecycle::internal_mode() {
+        return Ok(());
+    }
+    if let Err(error) = services::lifecycle::initialize() {
+        eprintln!("安全启动失败：{error}");
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                std::ptr::null_mut(),
+                services::native::wide(format!(
+                    "安全启动已阻止，未启动内核或修改新的代理设置。\n{error}"
+                ))
+                .as_ptr(),
+                services::native::wide("SmartClash 网络恢复提示").as_ptr(),
+                windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                    | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+            );
+        }
+        return Err(eframe::Error::AppCreation(Box::<
+            dyn std::error::Error + Send + Sync,
+        >::from(error)));
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 780.0])
@@ -36,6 +57,7 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App {
                 shared,
                 view: ui::ViewState::default(),
+                force_close: false,
             }))
         }),
     )
@@ -44,10 +66,79 @@ fn main() -> eframe::Result<()> {
 struct App {
     shared: state::Shared,
     view: ui::ViewState,
+    force_close: bool,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let (exiting, done, running, error) = {
+            let store = self.shared.lock().unwrap();
+            (
+                store.exiting,
+                store.shutdown_done,
+                store.shutdown_running,
+                store.shutdown_error.clone(),
+            )
+        };
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested && !done && !self.force_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            state::actions::shutdown(&self.shared);
+            if !exiting {
+                ctx.request_repaint();
+                return;
+            }
+        }
+        if done {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if exiting {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("正在安全退出");
+                ui.label("等待后台探测、内核 Job 和网络恢复确认后关闭窗口。");
+                if running {
+                    ui.spinner();
+                }
+                if let Some(error) = error {
+                    ui.colored_label(ui::widgets::BAD, error);
+                    if ui.button("重试清理").clicked() {
+                        state::actions::shutdown(&self.shared);
+                    }
+                    ui.label(
+                        "强制退出不会撤销守护：独立守护仍会继续回收内核并尝试恢复同用户代理。",
+                    );
+                    if ui.button("明确强制退出").clicked() {
+                        self.force_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            });
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        if let Some(error) = services::lifecycle::guardian_failure() {
+            let mut store = self.shared.lock().unwrap();
+            if store.running || store.tun || store.error.as_ref() != Some(&error) {
+                store.running = false;
+                store.tun = false;
+                store.system_proxy = services::system_proxy::SystemProxy::has_backup();
+                store.recovery = true;
+                store.error = Some(error.clone());
+                store.log(&error);
+            }
+            drop(store);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("独立守护已失效");
+                ui.label(&error);
+                ui.label("资源启动已封闭，正在独立恢复网络；请关闭后重新启动程序。");
+                if ui.button("安全退出").clicked() {
+                    state::actions::shutdown(&self.shared);
+                }
+            });
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
         let mut pending: Vec<ui::Action> = Vec::new();
         {
             let mut store = self.shared.lock().unwrap();
@@ -156,10 +247,7 @@ fn install_fonts(ctx: &egui::Context) {
         r"C:\Windows\Fonts\SimsunExtG.ttf",
         r"C:\Windows\Fonts\segoeui.ttf",
     ];
-    let Some(bytes) = candidates
-        .iter()
-        .find_map(|path| std::fs::read(path).ok())
-    else {
+    let Some(bytes) = candidates.iter().find_map(|path| std::fs::read(path).ok()) else {
         return;
     };
     let mut fonts = egui::FontDefinitions::default();

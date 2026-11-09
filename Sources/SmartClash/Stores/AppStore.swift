@@ -27,6 +27,11 @@ final class AppStore: ObservableObject {
     @Published var activeTrace = ChainTrace.resolve(selected: "", rawNodes: [], definitions: [])
     @Published var standbyReadyCount = 0
     @Published var stopping = false
+    @Published private(set) var terminating = false
+    private var lifecycleReady = false
+    private var startupTask: Task<Void, Never>?
+    private var shutdownTask: Task<Bool, Never>?
+    private var shutdownComplete = false
     @Published var ruleSnapshot: RuleSnapshot?
     @Published var rulesUpdating = false
     @Published var ruleUpdateMessage = "规则尚未下载"
@@ -90,50 +95,87 @@ final class AppStore: ObservableObject {
         return (nodes + (routePlan?.definitions ?? []) + routeNodes).filter { seen.insert($0.name).inserted }
     }
     var subscriptionURL: String { aggregate.address }
-    var canChangeSources: Bool { !running && !recovery }
+    var canChangeSources: Bool { !terminating && !running && !recovery }
     init(loadFromDisk: Bool = true) {
+        var bootstrapError: Error?
+        if loadFromDisk {
+            do { try GuardianClient.shared.bootstrap() }
+            catch { bootstrapError = error }
+        }
         persistsChanges = loadFromDisk
-        traffic = TrafficStore(filename: loadFromDisk ? Files.root.appendingPathComponent("traffic-history.json") : nil)
-        activity = NetworkActivityStore(geo: GeoIPService(cacheURL: loadFromDisk ? Files.root.appendingPathComponent("geoip-cache.json") : nil))
+        let mayReadDisk = loadFromDisk && bootstrapError == nil
+        traffic = TrafficStore(filename: mayReadDisk ? Files.root.appendingPathComponent("traffic-history.json") : nil)
+        activity = NetworkActivityStore(geo: GeoIPService(cacheURL: mayReadDisk ? Files.root.appendingPathComponent("geoip-cache.json") : nil))
         api = CoreClient(secret: preferences.secret)
         aggregate = AggregateServer(token: preferences.subscriptionToken)
         guard loadFromDisk else { return }
-        do {
-            try Files.setup()
-            if FileManager.default.fileExists(atPath: settings.path) {
-                preferences = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: settings))
+        if let bootstrapError {
+            recovery = true
+            self.error = "生命周期守护初始化失败：\(bootstrapError.localizedDescription)"
+            return
+        }
+        startupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.startupTask = nil }
+            do {
+                try self.checkNotTerminating()
+                try await PrivilegedClient.shared.reconcileAtStartup()
+                try self.checkNotTerminating()
+                try self.initializeFromDisk()
+                self.lifecycleReady = true
+            } catch {
+                self.recovery = true
+                let message = "启动对账未完成：\(error.localizedDescription)"
+                self.error = message; self.log(message)
             }
-            preferences.interval = max(1, min(3600, preferences.interval))
-            // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
-            if let saved = preferences.proxyPort, Configuration.validateProxyPort(saved) != nil {
-                preferences.proxyPort = Configuration.defaultProxyPort
-                log("已保存的代理端口不可用，已回退为 \(Configuration.defaultProxyPort)")
-            }
-            let port = preferences.proxyPort ?? Configuration.defaultProxyPort
-            preferences.proxyPort = port
-            Configuration.proxyPort = port
-            engine.configure(kind: preferences.kernel ?? .mihomo)
-            try Files.write(JSONEncoder().encode(preferences), to: settings)
-            api = CoreClient(secret: preferences.secret)
-            aggregate = AggregateServer(token: preferences.subscriptionToken)
-            ruleSnapshot = RuleSubscriptionService.cached(at: Files.root.appendingPathComponent("routing-rules.json"))
-            try aggregate.updateRules(ruleSnapshot ?? RuleSnapshot(modules: [:]))
-            if let snapshot = ruleSnapshot { ruleUpdateMessage = "已载入 \(snapshot.count) 条缓存规则" }
-            nodes = SubscriptionService.cached(preferences.sources)
-            if let data = try? Data(contentsOf: Files.root.appendingPathComponent("latencies.json")),
-               let saved = try? JSONDecoder().decode([String: NodeLatency].self, from: data) {
-                let ids = Set(nodes.map(\.id)); latencies = saved.filter { ids.contains($0.key) }
-            }
-            if let data = try? Data(contentsOf: Files.root.appendingPathComponent("link-measurements.json")),
-               let saved = try? JSONDecoder().decode([String: LinkMeasurements].self, from: data) { measurements = saved }
-            if !nodes.isEmpty { try aggregate.update(nodes) }
-            try aggregate.start { [weak self] message in Task { @MainActor in self?.error = message; self?.subscriptionReady = false } }
-            subscriptionReady = true
-            recovery = proxy.hasBackup || engine.recoveryNeeded
-            systemProxy = proxy.hasBackup
-            if recovery { log("发现上次运行的恢复记录，请点击“恢复网络”") }
-            startRuleSchedule()
-        } catch { self.error = error.localizedDescription }
+        }
+    }
+    private func initializeFromDisk() throws {
+        try checkNotTerminating()
+        if FileManager.default.fileExists(atPath: settings.path) {
+            preferences = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: settings))
+        }
+        preferences.interval = max(1, min(3600, preferences.interval))
+        // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
+        if let saved = preferences.proxyPort, Configuration.validateProxyPort(saved) != nil {
+            preferences.proxyPort = Configuration.defaultProxyPort
+            log("已保存的代理端口不可用，已回退为 \(Configuration.defaultProxyPort)")
+        }
+        let port = preferences.proxyPort ?? Configuration.defaultProxyPort
+        preferences.proxyPort = port
+        Configuration.proxyPort = port
+        engine.configure(kind: preferences.kernel ?? .mihomo)
+        try Files.write(JSONEncoder().encode(preferences), to: settings)
+        api = CoreClient(secret: preferences.secret)
+        aggregate = AggregateServer(token: preferences.subscriptionToken)
+        ruleSnapshot = RuleSubscriptionService.cached(at: Files.root.appendingPathComponent("routing-rules.json"))
+        try aggregate.updateRules(ruleSnapshot ?? RuleSnapshot(modules: [:]))
+        if let snapshot = ruleSnapshot { ruleUpdateMessage = "已载入 \(snapshot.count) 条缓存规则" }
+        nodes = SubscriptionService.cached(preferences.sources)
+        if let data = try? Data(contentsOf: Files.root.appendingPathComponent("latencies.json")),
+           let saved = try? JSONDecoder().decode([String: NodeLatency].self, from: data) {
+            let ids = Set(nodes.map(\.id)); latencies = saved.filter { ids.contains($0.key) }
+        }
+        if let data = try? Data(contentsOf: Files.root.appendingPathComponent("link-measurements.json")),
+           let saved = try? JSONDecoder().decode([String: LinkMeasurements].self, from: data) { measurements = saved }
+        if !nodes.isEmpty { try aggregate.update(nodes) }
+        try aggregate.start { [weak self] message in Task { @MainActor in
+            guard let self, !self.terminating else { return }
+            self.error = message; self.subscriptionReady = false
+        } }
+        subscriptionReady = true
+        recovery = proxy.hasBackup || engine.recoveryNeeded
+        systemProxy = proxy.hasBackup
+        if recovery { log("发现上次运行的恢复记录，请点击“恢复网络”") }
+        startRuleSchedule()
+    }
+    func checkNotTerminating() throws {
+        guard !terminating else { throw CancellationError() }
+        try Task.checkCancellation()
+    }
+    func checkLifecycle() throws {
+        try checkNotTerminating()
+        guard !persistsChanges || lifecycleReady else { throw ProxyError.message("生命周期启动对账尚未完成，暂不接受操作") }
     }
     func log(_ message: String) {
         logs.insert("\(Date().formatted(date: .omitted, time: .standard))  \(message)", at: 0)
@@ -146,6 +188,11 @@ final class AppStore: ObservableObject {
     }
     @discardableResult
     func perform(_ action: @escaping @MainActor () async throws -> Void) -> Task<Void, Never> {
+        guard !terminating else { return Task {} }
+        guard !persistsChanges || lifecycleReady else {
+            error = "生命周期启动对账尚未完成，暂不接受操作"
+            return Task {}
+        }
         let previous = operationTask
         previous?.cancel()
         let restoring = stopTask
@@ -157,9 +204,9 @@ final class AppStore: ObservableObject {
             await previous?.value
             await restoring?.value
             do {
-                try Task.checkCancellation()
+                try checkLifecycle()
                 await pauseMonitoring()
-                try Task.checkCancellation()
+                try checkLifecycle()
                 try await action()
             } catch {
                 if !Task.isCancelled && !(error is CancellationError) {
@@ -169,7 +216,7 @@ final class AppStore: ObservableObject {
             guard generation == operationGeneration else { return }
             operationTask = nil
             busy = false
-            if running && monitoringRequested && !stopping { startMonitor() }
+            if running && monitoringRequested && !stopping && !terminating { startMonitor() }
         }
         operationTask = task
         return task
@@ -183,6 +230,11 @@ final class AppStore: ObservableObject {
         healthCheckInFlight = false
     }
     func requestStop() {
+        if terminating {
+            Task { _ = await shutdown() }
+            return
+        }
+        guard !persistsChanges || lifecycleReady else { return }
         operationTask?.cancel(); latencyTask?.cancel()
         monitor?.cancel(); standbyMonitor?.cancel()
         guard !stopping else { return }
@@ -222,30 +274,37 @@ final class AppStore: ObservableObject {
         nodes = SubscriptionService.cached(preferences.sources); try? aggregate.update(nodes)
     }
     func refresh() async throws {
+        try checkLifecycle()
         // Manual refresh while stopped; running refresh uses a validated API reload in normal mode.
         // Privileged TUN config is immutable to the GUI and must be restarted explicitly.
         guard !dynamicMode else { throw ProxyError.message("智能路由运行中，请停止后更新订阅") }
         guard !tun else { throw ProxyError.message("更新订阅前请先关闭 TUN 并停止内核") }
         let update = try await SubscriptionService.update(preferences.sources, throughProxy: running)
+        try checkLifecycle()
         nodes = update.nodes; try aggregate.update(nodes); lastUpdate = Date()
         for warning in update.warnings { log(warning) }
         if running { try await reloadRunningCore() }
         log("订阅已合并：\(nodes.count) 个去重节点")
     }
     func start(tun wanted: Bool = false, preferredName requestedName: String? = nil, purpose: CoreStartPurpose = .connection) async throws {
+        try checkLifecycle()
         guard persistsChanges else { throw ProxyError.message("离线验收实例不启动真实内核") }
         guard !recovery else { throw ProxyError.message("请先恢复上次网络设置") }
         if wanted && !kernel.capabilities.tun { throw ProxyError.message("\(kernel.title) 内核不支持 TUN，请改用 Mihomo 或 sing-box") }
         if trafficMode == .rule && purpose == .connection { try await ensureRulesReady() }
-        let known = NodeRanking.connectionCandidates(routeNodes, latencies: latencies).first
-        let preferredName = requestedName ?? known.flatMap { latencies[$0.id]?.reachable == true && latencies[$0.id]?.isFresh() == true ? $0.name : nil }
+        let preferred = NodeRanking.connectionCandidates(routeNodes, latencies: latencies).first { kernel.supports($0) }
+        let preferredName = requestedName ?? preferred?.name
         outboundInterface = try await NetworkEnvironment.defaultInterface(forTun: wanted)
+        try checkLifecycle()
         let built = try KernelConfiguration.make(kind: kernel, nodes: nodes, secret: preferences.secret, tun: wanted,
             routes: routePlan?.candidates, extraProxies: routePlan?.definitions ?? [],
             outboundInterface: outboundInterface, preferredName: preferredName,
             trafficMode: trafficMode, ruleProviderBaseURL: ruleProviderBaseURL)
         for warning in built.warnings { log(warning) }
-        do { try await engine.start(data: built.data, tun: wanted, api: api, kind: kernel) }
+        do {
+            try await engine.start(data: built.data, tun: wanted, api: api, kind: kernel)
+            try checkLifecycle()
+        }
         catch { recovery = engine.recoveryNeeded || proxy.hasBackup; throw error }
         running = true; tun = wanted
         rulesAppliedToCore = false
@@ -258,6 +317,7 @@ final class AppStore: ObservableObject {
         } else if kernel.capabilities.rules != .provider {
             rulesAppliedToCore = true
         }
+        try checkLifecycle()
         selected = routeNodes.first(where: { $0.name == preferredName })?.name ?? routeNodes.first?.name ?? ""
         internetStatus = "内核已启动，尚未验证出网"
         publishRoute()
@@ -290,12 +350,15 @@ final class AppStore: ObservableObject {
         var errors: [String] = []
         do { try await proxy.restore() } catch { errors.append(error.localizedDescription) }
         do { try await engine.stop() } catch { errors.append(error.localizedDescription) }
+        if GuardianClient.shared.hasChildren {
+            do { try await GuardianClient.shared.stopAll() } catch { errors.append(error.localizedDescription) }
+        }
         traffic.stop()
         activity.stop()
         systemProxy = proxy.hasBackup
         running = false; tun = false; selected = ""; dynamicMode = false; routePlan = nil
         routingStatus = "尚未打通"; internetStatus = "未连接"; outboundInterface = nil
-        recovery = engine.recoveryNeeded || !errors.isEmpty
+        recovery = engine.recoveryNeeded || proxy.hasBackup || GuardianClient.shared.hasChildren || !errors.isEmpty
         activeMode = nil; publishRoute()
         if errors.isEmpty { log("代理已停止，网络设置已恢复") }
         else { log("停止未完全成功：\(errors.joined(separator: "；"))") }
@@ -304,6 +367,7 @@ final class AppStore: ObservableObject {
     /// 带现场恢复的内核重启：保留智能路由计划与当前出口，TUN 重启后复验出网，
     /// 原本开启的系统代理会自动重新指向新端口。与 Windows 版 restart_core 语义一致。
     func restartCore(preferredName: String? = nil) async throws {
+        try checkLifecycle()
         guard running else { return }
         let wasTun = tun
         let wasSystemProxy = systemProxy
@@ -325,6 +389,7 @@ final class AppStore: ObservableObject {
     }
     /// 修改本地混合代理端口。运行中会自动重启内核使新端口生效；失败时回滚。
     func changeProxyPort(_ port: Int) async throws {
+        try checkLifecycle()
         let current = Configuration.proxyPort
         guard current != port else { return }
         if let message = Configuration.validateProxyPort(port) { throw ProxyError.message(message) }
@@ -349,6 +414,7 @@ final class AppStore: ObservableObject {
     /// 订阅刷新后把合并结果应用到运行中的内核：
     /// Mihomo / sing-box 走 Clash 控制接口热重载完整配置；Xray 只能重启生效。
     func reloadRunningCore() async throws {
+        try checkLifecycle()
         guard running else { return }
         if kernel.capabilities.liveSwitch {
             let built = try KernelConfiguration.make(kind: kernel, nodes: nodes, secret: preferences.secret, tun: tun,
@@ -370,9 +436,11 @@ final class AppStore: ObservableObject {
     }
     /// 切换前的节点预检：用临时单节点内核完成一次 HTTPS 探测，不影响当前业务出口。
     func latencySample(_ node: ProxyNode) async -> NodeLatency {
-        await EphemeralProbe.latency(kind: kernel, node: node)
+        guard !terminating, persistsChanges, lifecycleReady else { return NodeLatency(milliseconds: nil, failure: "生命周期尚未就绪或正在退出") }
+        return await EphemeralProbe.latency(kind: kernel, node: node)
     }
     func toggleSystem() async throws {
+        try checkLifecycle()
         if systemProxy { try await proxy.restore(); systemProxy = false; dynamicMode = false; routingStatus = "系统代理已关闭，内核继续运行"; return }
         let startedHere = !running
         do {
@@ -389,6 +457,7 @@ final class AppStore: ObservableObject {
         startMonitor(); log("系统 HTTP / HTTPS / SOCKS 代理已开启")
     }
     func toggleTun() async throws {
+        try checkLifecycle()
         let wanted = !tun
         let smart = dynamicMode
         if !wanted {
@@ -455,6 +524,7 @@ final class AppStore: ObservableObject {
         throw ProxyError.message(TunVerificationPolicy.failureMessage(attempts: attempts, last: result.detail))
     }
     func oneClickConnect() async throws {
+        try checkLifecycle()
         if recovery { try await stop() }
         if running { try await stop() }
         if trafficMode == .direct {
@@ -506,12 +576,14 @@ final class AppStore: ObservableObject {
         routingStatus = "已打通"
     }
     func ensureReachableRoute(preferCurrent: Bool = true) async throws {
+        try checkLifecycle()
         let mode = preferences.routingMode ?? .lowLatency
         routingStatus = "正在验证\(mode.title)"
         var candidates = NodeRanking.connectionCandidates(nodeListNodes, latencies: latencies)
         if preferCurrent, let index = candidates.firstIndex(where: { $0.name == selected && latencies[$0.id]?.reachable == true && latencies[$0.id]?.isFresh() == true }) {
             candidates.insert(candidates.remove(at: index), at: 0)
         }
+        candidates = NodeRanking.preferNonHongKong(candidates)
         let deadline = Date().addingTimeInterval(30)
         // Recheck a fresh known success before launching another batch of tests.
         if mode == .lowLatency, let current = candidates.first, latencies[current.id]?.reachable == true,
@@ -526,9 +598,14 @@ final class AppStore: ObservableObject {
         var offset = 0
         var speedAttempts = 0
         var speedTested = Set<String>()
+        var fallbackStarted = false
         while offset < candidates.count && Date() < deadline {
             try Task.checkCancellation()
-            let batch = Array(candidates.dropFirst(offset).prefix(6)); offset += batch.count
+            // Do not let a faster fallback exit win a mixed-region probe batch.
+            let fallbackTier = NodeRanking.isHongKong(candidates[offset])
+            if fallbackTier && !fallbackStarted { speedAttempts = 0; fallbackStarted = true }
+            let batch = Array(candidates.dropFirst(offset).prefix(6).prefix { NodeRanking.isHongKong($0) == fallbackTier })
+            offset += batch.count
             await measureLatencies(batch)
             try Task.checkCancellation()
             let reachable = NodeRanking.sorted(batch, latencies: latencies).filter { latencies[$0.id]?.reachable == true }
@@ -538,7 +615,7 @@ final class AppStore: ObservableObject {
                     if try await check(node).health == .healthy { break }
                 }
             } else if mode == .highSpeed {
-                routingStatus = "正在抽测下载吞吐（每轮约 3 MiB）"
+                routingStatus = "正在抽测下载吞吐（每组最多 3 MiB）"
                 for node in reachable {
                     guard speedAttempts < 3, Date() < deadline else { break }
                     speedAttempts += 1
@@ -561,12 +638,16 @@ final class AppStore: ObservableObject {
                 latencies[node.id] = NodeLatency(milliseconds: nil, failure: "业务出网未通过")
                 if Date() >= deadline { break }
             }
-            if mode == .highSpeed && speedAttempts >= 3 { break }
+            if mode == .highSpeed && speedAttempts >= 3 {
+                guard !fallbackTier, let fallback = candidates.indices.dropFirst(offset).first(where: { NodeRanking.isHongKong(candidates[$0]) }) else { break }
+                offset = fallback; speedAttempts = 0
+            }
         }
         saveLatencies(); saveMeasurements(); routingStatus = "\(mode.title)未通过验证"
         throw ProxyError.message("本轮没有通过\(mode.title)验证的线路；未开启新的系统代理，请检查订阅或尝试其他模式")
     }
     func applyRoutingMode() async throws {
+        try checkLifecycle()
         guard running else { throw ProxyError.message("请先连接，或启动本机内核") }
         guard trafficMode != .direct else { throw ProxyError.message("直连模式不使用代理选路，请先切换流量模式") }
         let previousStatus = routingStatus
@@ -615,7 +696,7 @@ final class AppStore: ObservableObject {
         try await discoverRoute()
     }
     private var freshStandbys: [ProxyNode] {
-        routeNodes.filter { node in
+        NodeRanking.preferNonHongKong(routeNodes.filter { node in
             guard node.name != selected, let status = statuses[node.id] else { return false }
             return StandbyPolicy.usable(status.result, checked: status.checked, now: Date())
         }.sorted {
@@ -625,9 +706,10 @@ final class AppStore: ObservableObject {
                 if left != right { return left > right }
             }
             return (statuses[$0.id]?.result.milliseconds ?? Int.max) < (statuses[$1.id]?.result.milliseconds ?? Int.max)
-        }
+        })
     }
     private func startStandbyMonitor() {
+        guard !terminating else { return }
         // 备用线路轮询依赖运行时追加配置；sing-box / Xray 使用即时选路，不做后台预生成。
         guard kernel == .mihomo else { return }
         standbyMonitor?.cancel()
@@ -655,7 +737,7 @@ final class AppStore: ObservableObject {
         }
     }
     func select(_ node: ProxyNode) async throws {
-        try Task.checkCancellation()
+        try checkLifecycle()
         guard running else { throw ProxyError.message("请先启动内核") }
         if kernel.capabilities.liveSwitch {
             if let plan = routePlan, !plan.candidates.contains(where: { $0.id == node.id }) {
@@ -689,6 +771,7 @@ final class AppStore: ObservableObject {
         if standbyReadyCount != ready { standbyReadyCount = ready }
     }
     func selectVerified(_ node: ProxyNode) async throws {
+        try checkLifecycle()
         guard running else { throw ProxyError.message("请先启动内核或运行一次延迟测试") }
         guard trafficMode != .direct else { throw ProxyError.message("直连模式不使用代理节点，请先切换流量模式") }
         let previous = routeNodes.first(where: { $0.name == selected })
@@ -707,6 +790,7 @@ final class AppStore: ObservableObject {
         startMonitor()
     }
     func withProbe<T>(_ node: ProxyNode, operation: (Int) async throws -> T) async throws -> T {
+        try checkLifecycle()
         // Xray 没有 Clash 控制接口，无法切换 PROBE 组；改用临时单节点内核完成探测。
         if kernel == .xray {
             try Task.checkCancellation()
@@ -738,6 +822,7 @@ final class AppStore: ObservableObject {
         return result
     }
     func inspectCurrent(force: Bool = false) async throws {
+        try checkLifecycle()
         guard running else { return }
         // A heartbeat distinguishes a dead core from an unhealthy exit node.
         let heartbeat = try? await api.request("/version")
@@ -790,14 +875,16 @@ final class AppStore: ObservableObject {
         let offset = scanOffset % alternatives.count
         let rotated = Array(alternatives[offset...] + alternatives[..<offset])
         scanOffset = (offset + 12) % alternatives.count
-        let candidates = rotated.filter { node in
+        let candidates = NodeRanking.preferNonHongKong(rotated.filter { node in
             guard let s = statuses[node.id] else { return true }
             return s.result.health == .healthy || Date().timeIntervalSince(s.checked) > 60
-        }.prefix(12)
+        }).prefix(12)
         var best: (ProxyNode, ProbeResult)?
         for node in candidates {
+            if NodeRanking.isHongKong(node), let best, !NodeRanking.isHongKong(best.0) { break }
             let result = try await check(node, openAI: activeMode == .ai)
-            if result.health == .healthy && (best == nil || result.milliseconds < best!.1.milliseconds) { best = (node, result) }
+            if result.health == .healthy && (best == nil ||
+                (NodeRanking.isHongKong(node) == NodeRanking.isHongKong(best!.0) && result.milliseconds < best!.1.milliseconds)) { best = (node, result) }
             // Stop early when an acceptable healthy exit is found.
             if let best, best.1.milliseconds < 1500 { break }
         }
@@ -806,6 +893,7 @@ final class AppStore: ObservableObject {
         log("OpenAI 连通性恢复：\(best.1.milliseconds) ms；已有连接可能需要重试")
     }
     private func startMonitor() {
+        guard !terminating else { return }
         monitoringRequested = true
         guard monitor == nil else { return }
         startStandbyMonitor()
@@ -835,14 +923,58 @@ final class AppStore: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     func shutdown() async -> Bool {
+        if shutdownComplete { return true }
+        if let shutdownTask { return await shutdownTask.value }
+        // 永久关闭入口；取消退出或清理失败也不重新允许创建资源。
+        terminating = true
+        engine.closeGate(); proxy.closeGate()
+        if persistsChanges {
+            GuardianClient.shared.closeGate()
+            PrivilegedClient.shared.closeGate()
+        }
+        startupTask?.cancel(); operationTask?.cancel(); latencyTask?.cancel()
+        monitor?.cancel(); standbyMonitor?.cancel()
         rulesScheduleTask?.cancel(); rulesRefreshTask?.cancel()
-        await rulesScheduleTask?.value
-        operationTask?.cancel(); await operationTask?.value
-        await stopTask?.value
-        await pauseMonitoring()
-        // Commands have bounded network timeouts; allow any in-flight update to complete first.
-        while busy { try? await Task.sleep(nanoseconds: 200_000_000) }
-        do { try await stop(); return true }
-        catch { self.error = error.localizedDescription; return false }
+        let startup = startupTask, operation = operationTask, latency = latencyTask, stoppingTask = stopTask
+        let schedule = rulesScheduleTask, refresh = rulesRefreshTask
+        stopping = true; busy = true; monitoringRequested = false
+        let task = Task { @MainActor in
+            await startup?.value
+            await operation?.value
+            await latency?.value
+            await stoppingTask?.value
+            await schedule?.value
+            _ = try? await refresh?.value
+            await self.pauseMonitoring()
+            defer { self.stopping = false; self.busy = false }
+            var failures: [String] = []
+            do { try await self.stop() } catch { failures.append(error.localizedDescription) }
+            if self.persistsChanges {
+                do {
+                    try await PrivilegedClient.shared.endSession()
+                    self.engine.confirmPrivilegedSessionEnded()
+                } catch { failures.append(error.localizedDescription) }
+                do {
+                    try await GuardianClient.shared.end()
+                    self.engine.confirmGuardianEnded()
+                } catch { failures.append(error.localizedDescription) }
+            }
+            self.aggregate.stop()
+            self.subscriptionReady = false
+            guard failures.isEmpty else {
+                self.recovery = true
+                let message = "退出恢复未完成：" + failures.joined(separator: "；") + "。已禁止重新连接，请重试停止或退出。"
+                self.error = message; self.log(message)
+                return false
+            }
+            self.recovery = false; self.systemProxy = false
+            self.error = nil
+            self.shutdownComplete = true
+            return true
+        }
+        shutdownTask = task
+        let result = await task.value
+        shutdownTask = nil
+        return result
     }
 }

@@ -12,17 +12,18 @@ extension AppStore {
         catch { self.error = "无法保存本机延迟测试结果" }
     }
     func measureLatencies(_ targets: [ProxyNode]) async {
+        guard !terminating else { return }
         let client = api!
         await LatencyTester.run(targets.map { LatencyRequest(id: $0.id, name: $0.name) }, probe: { request in
             await client.delay(request.name)
         }, receive: { [weak self] id, result in
-            guard let self, !Task.isCancelled else { return }
+            guard let self, !self.terminating, !Task.isCancelled else { return }
             self.latencies[id] = result
             if self.isTestingLatency { self.latencyCompleted += 1 }
         })
     }
     func beginLatencyTest(_ targets: [ProxyNode]? = nil) {
-        guard !recovery else { return }
+        guard !terminating, !recovery else { return }
         let targets = targets ?? nodes
         guard !targets.isEmpty else { error = "请先添加并更新订阅"; return }
         latencyTask = perform { [weak self] in

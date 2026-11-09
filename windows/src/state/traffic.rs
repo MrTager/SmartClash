@@ -81,7 +81,12 @@ impl TrafficData {
     }
 }
 
-pub fn start(client: CoreClient, data: Arc<Mutex<TrafficData>>, stop: Arc<AtomicBool>, run_id: String) {
+pub fn start(
+    client: CoreClient,
+    data: Arc<Mutex<TrafficData>>,
+    stop: Arc<AtomicBool>,
+    run_id: String,
+) {
     {
         let mut guard = data.lock().unwrap();
         guard.session_upload = 0;
@@ -90,11 +95,11 @@ pub fn start(client: CoreClient, data: Arc<Mutex<TrafficData>>, stop: Arc<Atomic
         guard.connected = false;
     }
     if client.kind == KernelKind::Xray {
-        std::thread::spawn(move || poll_xray(client, data, stop, run_id));
+        crate::services::workers::spawn(move || poll_xray(client, data, stop, run_id));
         return;
     }
-    std::thread::spawn(move || {
-        while !stop.load(Ordering::SeqCst) {
+    crate::services::workers::spawn(move || {
+        while !stop.load(Ordering::SeqCst) && crate::services::workers::valid() {
             let Ok(mut child) = client.traffic_stream() else {
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
@@ -145,7 +150,7 @@ fn poll_xray(
     run_id: String,
 ) {
     let mut previous: Option<(u64, u64, u64)> = None;
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::SeqCst) && crate::services::workers::valid() {
         match client.traffic_totals() {
             Ok((up, down)) => {
                 let now = now_ms();
@@ -154,10 +159,7 @@ fn poll_xray(
                         let seconds = (now - last_time) as f64 / 1000.0;
                         let up_delta = up.saturating_sub(last_up) as f64;
                         let down_delta = down.saturating_sub(last_down) as f64;
-                        (
-                            (up_delta / seconds) as u64,
-                            (down_delta / seconds) as u64,
-                        )
+                        ((up_delta / seconds) as u64, (down_delta / seconds) as u64)
                     }
                     _ => (0, 0),
                 };

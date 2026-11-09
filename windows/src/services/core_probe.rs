@@ -33,19 +33,17 @@ impl EphemeralProbe {
         }
         let port = free_port()?;
         let sequence = SEQ.fetch_add(1, Ordering::SeqCst);
-        let dir = paths::data_root().join(format!(
-            "probe-{}-{sequence}",
-            std::process::id()
-        ));
+        let dir = paths::data_root().join(format!("probe-{}-{sequence}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建探测目录：{e}"))?;
         let config_path = dir.join("probe.json");
         let config = kernel_config::probe_config(kind, node, port)?;
         paths::write_private(&config_path, &config)?;
 
         let log_path = dir.join("probe.log");
-        let log = std::fs::File::create(&log_path)
+        let log = std::fs::File::create(&log_path).map_err(|e| format!("无法创建探测日志：{e}"))?;
+        let err = log
+            .try_clone()
             .map_err(|e| format!("无法创建探测日志：{e}"))?;
-        let err = log.try_clone().map_err(|e| format!("无法创建探测日志：{e}"))?;
         let mut cmd = Command::new(&exe);
         cmd.creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
@@ -75,7 +73,8 @@ impl EphemeralProbe {
                 cmd.env("XRAY_LOCATION_ASSET", paths::asset_dir());
             }
         }
-        let child = cmd.spawn().map_err(|e| format!("无法启动探测内核：{e}"))?;
+        let child = crate::services::lifecycle::spawn_child(&mut cmd)
+            .map_err(|e| format!("无法启动受控探测内核：{e}"))?;
         let mut probe = Self { child, dir, port };
         if let Err(error) = probe.wait_ready() {
             let detail = probe.log_tail();
@@ -93,7 +92,10 @@ impl EphemeralProbe {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
-                return Err(format!("探测内核提前退出（{}）", status.code().unwrap_or(-1)));
+                return Err(format!(
+                    "探测内核提前退出（{}）",
+                    status.code().unwrap_or(-1)
+                ));
             }
             if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
                 return Ok(());
@@ -148,7 +150,10 @@ pub fn latency(kind: KernelKind, node: &ProxyNode, timeout_ms: u64) -> NodeLaten
             failure: None,
         },
         Ok(result) => NodeLatency::new(None, Some(result.detail)),
-        Err(error) => NodeLatency::new(None, Some(format!("{error}（{} ms）", start.elapsed().as_millis()))),
+        Err(error) => NodeLatency::new(
+            None,
+            Some(format!("{error}（{} ms）", start.elapsed().as_millis())),
+        ),
     }
 }
 

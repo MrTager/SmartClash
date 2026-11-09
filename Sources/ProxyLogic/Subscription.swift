@@ -15,6 +15,12 @@ public struct ProxyNode: Identifiable {
     public let name: String
     public let sourceID: UUID
     public let payload: [String: Any]
+    // Keep the exit label outside the kernel payload, including for anonymous AUTO chains.
+    public let exitName: String
+    public init(id: String, name: String, sourceID: UUID, payload: [String: Any], exitName: String? = nil) {
+        self.id = id; self.name = name; self.sourceID = sourceID; self.payload = payload
+        self.exitName = exitName ?? name
+    }
 }
 public enum ProxyError: LocalizedError {
     case message(String)

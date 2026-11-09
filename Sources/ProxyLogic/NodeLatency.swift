@@ -22,6 +22,20 @@ public enum NodeSortOrder: String, CaseIterable, Identifiable {
 }
 
 public enum NodeRanking {
+    // Subscription labels are hints, not proof of exit IP location or OpenAI support.
+    public static func isHongKong(_ node: ProxyNode) -> Bool {
+        let label = node.exitName.lowercased()
+        if label.contains("香港") || label.contains("\u{1f1ed}\u{1f1f0}") { return true }
+        let words = label.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+        if words.contains("hk") || words.contains("hkg") || words.contains("hongkong") { return true }
+        return zip(words, words.dropFirst()).contains { $0.0 == "hong" && $0.1 == "kong" }
+    }
+
+    // Stable partition: keep metric/source order within each tier and retain fallback exits.
+    public static func preferNonHongKong(_ nodes: [ProxyNode]) -> [ProxyNode] {
+        nodes.filter { !isHongKong($0) } + nodes.filter { isHongKong($0) }
+    }
+
     public static func sorted(_ nodes: [ProxyNode], latencies: [String: NodeLatency], order: NodeSortOrder = .latency) -> [ProxyNode] {
         guard order != .original else { return nodes }
         return nodes.sorted { a, b in
@@ -56,7 +70,7 @@ public enum NodeRanking {
                 if let pool = pools[source], index < pool.count, seen.insert(pool[index].id).inserted { result.append(pool[index]) }
             }
         }
-        return result
+        return preferNonHongKong(result)
     }
 }
 

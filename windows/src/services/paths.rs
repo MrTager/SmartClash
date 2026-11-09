@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 /// 工作数据目录：%APPDATA%\SmartClash（对应 macOS 版的 Application Support）。
 pub fn data_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = std::env::var_os("SMARTCLASH_FIXTURE_ROOT") {
+        return PathBuf::from(root);
+    }
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
@@ -18,7 +22,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
     }
-    std::fs::write(path, data).map_err(|e| format!("无法写入 {}：{e}", path.display()))
+    crate::services::native::atomic_write(path, data)
 }
 
 pub fn read(path: &Path) -> Option<Vec<u8>> {
@@ -38,7 +42,9 @@ pub fn resource(name: &str) -> PathBuf {
     if beside.exists() {
         return beside;
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(name);
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join(name);
     if dev.exists() {
         return dev;
     }
@@ -75,9 +81,7 @@ pub fn curl_binary() -> PathBuf {
 }
 
 pub fn open_in_explorer(path: &Path) {
-    let _ = std::process::Command::new("explorer.exe")
-        .arg(path)
-        .spawn();
+    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
 }
 
 #[repr(C)]

@@ -26,7 +26,7 @@ public enum ChainBuilder {
                 payload["name"] = name
                 // Exit connects THROUGH the raw entry. Never reference a generated chain or group.
                 payload["dialer-proxy"] = entry.name
-                result.append(ProxyNode(id: id, name: name, sourceID: exit.sourceID, payload: payload))
+                result.append(ProxyNode(id: id, name: name, sourceID: exit.sourceID, payload: payload, exitName: exit.exitName))
             }
         }
         guard !result.isEmpty else { throw ProxyError.message("入口和出口不能是同一个节点") }

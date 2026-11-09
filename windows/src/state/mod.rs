@@ -5,14 +5,15 @@ mod tun_transition;
 
 use crate::logic::chain::ChainTrace;
 use crate::logic::dynamic_router::RoutePlan;
+use crate::logic::ranking::NodeRanking;
 use crate::logic::model::{
     LinkMeasurements, NodeLatency, NodeStatus, Preferences, ProbeResult, ProxyNode, RoutingMode,
 };
 use crate::services::aggregate_server::AggregateServer;
 use crate::services::core_process::CoreProcess;
 use crate::services::paths;
-use crate::services::system_proxy::SystemProxy;
 use crate::services::subscription_service;
+use crate::services::system_proxy::SystemProxy;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +32,10 @@ pub struct Store {
     pub system_proxy: bool,
     pub busy: bool,
     pub stopping: bool,
+    pub exiting: bool,
+    pub shutdown_running: bool,
+    pub shutdown_done: bool,
+    pub shutdown_error: Option<String>,
     pub error: Option<String>,
     pub logs: Vec<String>,
     pub recovery: bool,
@@ -94,10 +99,11 @@ impl Store {
         let nodes = subscription_service::cached(&preferences.sources);
         let node_ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
 
-        let mut latencies: HashMap<String, NodeLatency> = std::fs::read(root.join("latencies.json"))
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default();
+        let mut latencies: HashMap<String, NodeLatency> =
+            std::fs::read(root.join("latencies.json"))
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+                .unwrap_or_default();
         latencies.retain(|id, _| node_ids.contains(id));
 
         let measurements: HashMap<String, LinkMeasurements> =
@@ -125,6 +131,10 @@ impl Store {
             system_proxy: SystemProxy::has_backup(),
             busy: false,
             stopping: false,
+            exiting: false,
+            shutdown_running: false,
+            shutdown_done: false,
+            shutdown_error: None,
             error: None,
             logs: Vec::new(),
             recovery: false,
@@ -191,15 +201,12 @@ impl Store {
 
     pub fn save_measurements(&self) {
         if let Ok(data) = serde_json::to_vec(&self.measurements) {
-            let _ = paths::write_private(
-                &paths::data_root().join("link-measurements.json"),
-                &data,
-            );
+            let _ = paths::write_private(&paths::data_root().join("link-measurements.json"), &data);
         }
     }
 
     pub fn can_change_sources(&self) -> bool {
-        !self.running && !self.busy && !self.recovery && !self.is_testing_latency
+        !self.exiting && !self.running && !self.busy && !self.recovery && !self.is_testing_latency
     }
 
     pub fn route_nodes(&self) -> Vec<ProxyNode> {
@@ -221,16 +228,36 @@ impl Store {
         list
     }
 
+    /// 地球与实时连接需要完整定义，不能遗漏动态链路的中间跳与生成出口。
+    pub fn visualization_nodes(&self) -> Vec<ProxyNode> {
+        let mut seen = HashSet::new();
+        self.nodes
+            .iter()
+            .chain(self.route_plan.definitions.iter())
+            .chain(self.route_plan.candidates.iter())
+            .filter(|node| seen.insert(node.id.clone()))
+            .cloned()
+            .collect()
+    }
+
     pub fn subscription_url(&self) -> String {
         self.aggregate.address()
     }
 
     pub fn publish_route(&mut self) {
+        let known = self.visualization_nodes();
         let trace = ChainTrace::resolve(
-            if self.running { &self.selected } else { "" },
+            if self.running && self.preferences.traffic_mode.uses_proxy() {
+                &self.selected
+            } else {
+                ""
+            },
             &self.nodes,
-            &self.route_plan.definitions,
+            &known,
         );
+        if let Ok(mut activity) = self.activity.lock() {
+            activity.configure_active(&known, &trace);
+        }
         self.active_trace = trace;
         self.standby_ready = self.fresh_standbys().len();
     }
@@ -259,6 +286,10 @@ impl Store {
             .cloned()
             .collect();
         list.sort_by(|a, b| {
+            let region = NodeRanking::is_hong_kong(a).cmp(&NodeRanking::is_hong_kong(b));
+            if region != std::cmp::Ordering::Equal {
+                return region;
+            }
             if self.active_mode == Some(RoutingMode::HighSpeed) {
                 let left = self
                     .measurements
@@ -273,7 +304,9 @@ impl Store {
                     .map(|t| t.bytes_per_second)
                     .unwrap_or(0.0);
                 if left != right {
-                    return right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal);
+                    return right
+                        .partial_cmp(&left)
+                        .unwrap_or(std::cmp::Ordering::Equal);
                 }
             }
             let lm = self

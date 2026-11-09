@@ -4,12 +4,34 @@ import ProxyLogic
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
+    private var terminationTask: Task<Void, Never>?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let store else { return .terminateNow }
-        Task { sender.reply(toApplicationShouldTerminate: await store.shutdown()) }
+        guard terminationTask == nil else { return .terminateLater }
+        guard let store else {
+            let alert = NSAlert()
+            alert.messageText = "暂时无法安全退出"
+            alert.informativeText = "生命周期状态尚未绑定，未确认网络恢复。请稍后重试退出。"
+            alert.runModal()
+            return .terminateCancel
+        }
+        terminationTask = Task {
+            let stopped = await store.shutdown()
+            sender.reply(toApplicationShouldTerminate: stopped)
+            terminationTask = nil
+            if !stopped {
+                sender.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "网络恢复未完成，已取消退出"
+                alert.informativeText = store.error ?? "未确认后台资源已停止，请重试退出。"
+                alert.addButton(withTitle: "重试退出")
+                alert.addButton(withTitle: "留在应用中")
+                if alert.runModal() == .alertFirstButtonReturn { sender.terminate(nil) }
+            }
+        }
         return .terminateLater
     }
 }
@@ -18,9 +40,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct SmartClashApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var store = AppStore()
+    private func bindDelegate() { delegate.store = store }
     var body: some Scene {
+        // 在构造场景时绑定，不依赖首个窗口出现（菜单栏或早期退出也走清理）。
+        let _ = bindDelegate()
         WindowGroup("SmartClash", id: "main") {
-            ContentView().environmentObject(store).onAppear { delegate.store = store }
+            ContentView().environmentObject(store)
         }
         .commands {
             CommandGroup(replacing: .newItem) { }

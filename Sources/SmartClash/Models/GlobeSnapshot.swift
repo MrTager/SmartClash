@@ -21,10 +21,18 @@ struct GlobeSnapshot: Equatable {
     var routes: [GlobeRoute] = []
     var mappedConnections = 0
     var mappedNodes = 0
+    var selectedNodeID: String?
+    var selectedLocation: GeoLocation?
 
     static func make(nodes: [ProxyNode], activeTrace: ChainTrace, connections: [CoreConnection], locations: [String: GeoLocation],
                      focusedConnection: String?) -> GlobeSnapshot {
         var result = GlobeSnapshot()
+        if activeTrace.complete, let exit = activeTrace.hops.last, let node = nodes.first(where: { $0.id == exit.id }) {
+            result.selectedNodeID = node.id
+            if let server = node.payload["server"] as? String, let location = locations[server], location.isValid {
+                result.selectedLocation = location
+            }
+        }
         var markers: [String: GlobeMarker] = [:]
         let active = Set(activeTrace.hops.map(\.id))
         for node in nodes {

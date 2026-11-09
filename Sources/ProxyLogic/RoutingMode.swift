@@ -8,9 +8,9 @@ public enum RoutingMode: String, Codable, CaseIterable, Identifiable {
     }
     public var explanation: String {
         switch self {
-        case .lowLatency: return "优先选择实测 HTTPS 延迟较低、出网正常的线路。"
-        case .highSpeed: return "对最多 3 个候选各下载 1 MiB，按实测吞吐选择；每轮约消耗 3 MiB 测速流量。"
-        case .ai: return "线路必须通过 OpenAI API 可达性检查；不代表 ChatGPT 网页登录或账号权限。"
+        case .lowLatency: return "自动选路优先非中国香港节点，同组按实测 HTTPS 延迟选择；无合适线路时回退。"
+        case .highSpeed: return "优先非中国香港节点，按实测吞吐选择；每组最多测 3 个候选、各 1 MiB，含回退最多约 6 MiB。"
+        case .ai: return "优先非中国香港节点，线路仍须通过 OpenAI API 可达性检查；不代表 ChatGPT 网页登录或账号权限。"
         }
     }
 }
@@ -38,14 +38,14 @@ public enum ModeRanking {
     public static func best(_ nodes: [ProxyNode], mode: RoutingMode, latencies: [String: NodeLatency], measurements: [String: LinkMeasurements]) -> [ProxyNode] {
         let ordered = NodeRanking.sorted(nodes, latencies: latencies)
         switch mode {
-        case .lowLatency: return ordered
+        case .lowLatency: return NodeRanking.preferNonHongKong(ordered)
         case .highSpeed:
-            return ordered.filter { (measurements[$0.id]?.throughput?.bytesPerSecond ?? 0) > 0 }.sorted {
+            return NodeRanking.preferNonHongKong(ordered.filter { (measurements[$0.id]?.throughput?.bytesPerSecond ?? 0) > 0 }.sorted {
                 let left = measurements[$0.id]!.throughput!.bytesPerSecond
                 let right = measurements[$1.id]!.throughput!.bytesPerSecond
                 return left == right ? $0.id < $1.id : left > right
-            }
-        case .ai: return ordered.filter { measurements[$0.id]?.openAIReachable == true }
+            })
+        case .ai: return NodeRanking.preferNonHongKong(ordered.filter { measurements[$0.id]?.openAIReachable == true })
         }
     }
 }

@@ -12,6 +12,7 @@ final class NetworkActivityStore: ObservableObject {
     @Published private(set) var resolving = false
     private var nodes: [ProxyNode] = []
     private var preferredServers: [String] = []
+    private var activeNodeIDs: [String] = []
     private var pollTask: Task<Void, Never>?
     private var geoTask: Task<Void, Never>?
     private var attempted: [String: Date] = [:]
@@ -22,7 +23,27 @@ final class NetworkActivityStore: ObservableObject {
 
     func configure(nodes: [ProxyNode], active: [ProxyNode]) {
         self.nodes = nodes
-        preferredServers = active.compactMap { $0.payload["server"] as? String }
+        let servers = active.reversed().compactMap { $0.payload["server"] as? String }
+        let nodeIDs = active.map(\.id)
+        if activeNodeIDs != nodeIDs || preferredServers != servers {
+            for server in servers where locations[server] == nil { attempted.removeValue(forKey: server) }
+        }
+        activeNodeIDs = nodeIDs
+        preferredServers = servers
+    }
+
+    func nextGeolocationHost(at date: Date) -> String? {
+        let candidates = preferredServers + connections.prefix(80).flatMap { connection in
+            connection.routeNodes(in: nodes).compactMap { $0.payload["server"] as? String } +
+            [connection.metadata.geolocationKey].compactMap { $0 }
+        } + nodes.compactMap { $0.payload["server"] as? String }
+        guard let host = candidates.first(where: { host in
+            let retryInterval: TimeInterval = preferredServers.contains(host) ? 10 : 300
+            return locations[host] == nil && date.timeIntervalSince(attempted[host] ?? .distantPast) >= retryInterval
+        }) else { return nil }
+        // 预留本次尝试；失败后按当前线路的重试间隔再次选择。
+        attempted[host] = date
+        return host
     }
 
     func start(client: CoreClient, traffic: TrafficStore, runID: String) {
@@ -46,12 +67,8 @@ final class NetworkActivityStore: ObservableObject {
         geoTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled && generation == token {
-                let candidates = preferredServers + connections.prefix(80).flatMap { connection in
-                    connection.routeNodes(in: self.nodes).compactMap { $0.payload["server"] as? String } +
-                    [connection.metadata.geolocationKey].compactMap { $0 }
-                } + nodes.compactMap { $0.payload["server"] as? String }
-                if let host = candidates.first(where: { self.locations[$0] == nil && Date().timeIntervalSince(self.attempted[$0] ?? .distantPast) > 300 }) {
-                    attempted[host] = Date(); resolving = true
+                if let host = nextGeolocationHost(at: Date()) {
+                    resolving = true
                     let location = await geo.location(for: host)
                     guard !Task.isCancelled, generation == token else { return }
                     if let location { locations[host] = location }

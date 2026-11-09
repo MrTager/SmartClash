@@ -59,13 +59,6 @@ pub fn draw(
         });
     });
     ui.add_space(8.0);
-    if store.busy {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            hint(ui, "正在执行操作，可随时停止");
-        });
-    }
-
     widgets::routing_summary(store, ui, pending);
 
     widgets::card(ui, Some("当前实际生效路径"), |ui| {

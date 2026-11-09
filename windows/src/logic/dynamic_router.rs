@@ -87,6 +87,7 @@ impl DynamicRouter {
                     id: format!("auto-{digest}"),
                     name: name.clone(),
                     source_id: node.source_id.clone(),
+                    exit_name: node.exit_name.clone(),
                     payload,
                 };
                 definitions.insert(item.id.clone(), item.clone());

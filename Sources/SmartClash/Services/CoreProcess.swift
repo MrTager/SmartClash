@@ -1,10 +1,11 @@
 import Foundation
 import ProxyLogic
 import PrivilegedSupport
+
 @MainActor
 final class CoreProcess {
-    private var process: Process?
-    private var logHandle: FileHandle?
+    private var childID: String?
+    private var terminating = false
     private(set) var privileged = false
     private(set) var kind: KernelKind = .mihomo
     private let pidFile = Files.root.appendingPathComponent("core.pid")
@@ -12,30 +13,37 @@ final class CoreProcess {
     static let label = HelperLocation.coreLabel
     static let plist = HelperLocation.corePlist
     static let install = HelperLocation.coreDirectory
-    var recoveryNeeded: Bool { rootServicePresent || FileManager.default.fileExists(atPath: pidFile.path) }
+    var recoveryNeeded: Bool {
+        childID != nil || privileged || PrivilegedClient.shared.tunPending || rootServicePresent || FileManager.default.fileExists(atPath: pidFile.path)
+    }
     var executable: URL { resources.appendingPathComponent(kind.binaryName) }
     var assetDirectory: String { resources.path }
-    var alive: Bool {
-        if privileged { return rootServicePresent }
-        return process?.isRunning == true
-    }
+    var alive: Bool { privileged ? rootServicePresent : childID != nil }
     private var resources: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources") }
 
     func configure(kind: KernelKind) { self.kind = kind }
+    func closeGate() { terminating = true }
+    func confirmGuardianEnded() { childID = nil }
+    func confirmPrivilegedSessionEnded() { privileged = false }
+    private func checkGate() throws {
+        guard !terminating else { throw CancellationError() }
+        try Task.checkCancellation()
+    }
 
     func start(data: Data, tun: Bool, api: CoreClient, kind: KernelKind) async throws {
+        try checkGate()
         self.kind = kind
-        try Task.checkCancellation()
-        guard process == nil, !recoveryNeeded else { throw ProxyError.message("请先停止内核 / 恢复遗留服务") }
+        guard !recoveryNeeded else { throw ProxyError.message("请先停止内核 / 恢复遗留服务") }
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw ProxyError.message("安装包缺少 \(kind.title) 内核，请先运行 script/fetch_core.sh 并重新构建")
         }
-        // Refuse to attach to another application's controller or occupied proxy ports.
         let ports = kind == .xray
             ? [Configuration.proxyPort, KernelConfiguration.xraySocksPort, KernelConfiguration.xrayAPIPort]
             : [Configuration.controllerPort, Configuration.proxyPort, Configuration.probePort]
         for port in ports {
             let r = try await Command.run("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"], cancellable: true)
+            try checkGate()
+            guard !recoveryNeeded else { throw ProxyError.message("内核启动请求已过期，请先停止内核") }
             guard r.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ProxyError.message("端口 \(port) 已占用，请关闭冲突的代理程序")
             }
@@ -43,75 +51,59 @@ final class CoreProcess {
         let config = Files.root.appendingPathComponent("config.json")
         try Files.write(data, to: config)
         try await validate(data: data)
-        try Task.checkCancellation()
-        if tun {
-            guard kind.capabilities.tun else { throw ProxyError.message("\(kind.title) 内核不支持 TUN，请改用 Mihomo 或 sing-box") }
-            try await PrivilegedClient.shared.startTun(data, kernel: kind)
-            privileged = true
-        } else {
-            let log = Files.root.appendingPathComponent("core.log")
-            try Files.write(Data(), to: log)
-            logHandle = try FileHandle(forWritingTo: log)
-            let child = Process(); child.executableURL = executable
-            child.arguments = arguments(config: config.path)
-            child.environment = environment
-            child.standardOutput = logHandle; child.standardError = logHandle
-            try child.run(); process = child
-            do { try Files.write(Data("{\"pid\":\(child.processIdentifier),\"kernel\":\"\(kind.rawValue)\"}".utf8), to: pidFile) }
-            catch { child.terminate(); throw error }
-        }
+        try checkGate()
         do {
+            if tun {
+                guard kind.capabilities.tun else { throw ProxyError.message("\(kind.title) 内核不支持 TUN，请改用 Mihomo 或 sing-box") }
+                try await PrivilegedClient.shared.startTun(data, kernel: kind)
+                privileged = true
+            } else {
+                childID = try await GuardianClient.shared.spawn(executable: executable, arguments: arguments(config: config.path),
+                                                               directory: Files.root, environment: environment)
+            }
             for _ in 0..<40 {
-                try Task.checkCancellation()
-                if let p = process, !p.isRunning { throw ProxyError.message("内核提前退出，请查看 core.log") }
-                if try await ready(api: api) { return }
+                try checkGate()
+                if let id = childID {
+                    let status = try await GuardianClient.shared.status(id)
+                    try checkGate()
+                    guard status.running == true else { throw ProxyError.message("内核提前退出，请查看 guardian-\(id).log") }
+                }
+                if try await ready(api: api) { try checkGate(); return }
                 try await Task.sleep(nanoseconds: 250_000_000)
             }
-            throw ProxyError.message("内核启动超时，请检查 core.log")
+            throw ProxyError.message("内核启动超时，请检查 guardian 日志或 TUN 的 core.log")
         } catch { try? await stop(); throw error }
     }
 
-    /// Run the kernel's own configuration test without touching the running core.
     func validate(data: Data) async throws {
-        let temp = Files.root.appendingPathComponent("validate.json")
+        try checkGate()
+        let temp = Files.root.appendingPathComponent("validate-\(UUID().uuidString).json")
         try Files.write(data, to: temp)
-        let test = try await Command.run(executable.path, testArguments(config: temp.path), cancellable: true, environment: environment)
-        try Files.write(Data(test.text.utf8), to: Files.root.appendingPathComponent("core-test.log"))
-        guard test.code == 0 else { throw ProxyError.message("内核配置校验失败，请检查订阅节点格式（详情见 core-test.log）") }
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let code = try await GuardianClient.shared.validate(executable: executable, arguments: testArguments(config: temp.path),
+                                                            directory: Files.root, environment: environment)
+        try checkGate()
+        guard code == 0 else { throw ProxyError.message("内核配置校验失败，请检查订阅节点格式（详情见 guardian-*.log）") }
     }
 
     func stop() async throws {
-        if privileged || rootServicePresent {
-            // The fixed launchd label avoids killing unrelated proxy processes.
-            try await PrivilegedClient.shared.stopTun()
-            privileged = false
+        var failures: [String] = []
+        if privileged || PrivilegedClient.shared.tunPending || rootServicePresent {
+            do {
+                try await PrivilegedClient.shared.stopTun()
+                guard !rootServicePresent else { throw ProxyError.message("TUN 服务恢复未确认") }
+                privileged = false
+            } catch { failures.append(error.localizedDescription) }
         }
-        if let p = process {
-            if p.isRunning {
-                p.terminate()
-                for _ in 0..<30 { if !p.isRunning { break }; await Task.detached { try? await Task.sleep(nanoseconds: 100_000_000) }.value }
-                if p.isRunning { throw ProxyError.message("内核尚未退出，请稍后重试停止") }
-            }
-            process = nil
+        if let id = childID {
+            do { try await GuardianClient.shared.stop(id); childID = nil }
+            catch { failures.append(error.localizedDescription) }
         }
-        // An ordinary core can survive an abrupt GUI crash; validate its executable before termination.
+        // 旧版 PID 文件不包含可靠启动身份，不再按 PID / lsof 猜测归属并发信号。
         if FileManager.default.fileExists(atPath: pidFile.path) {
-            let record = try readRecoveryRecord()
-            let identity = try await Command.run("/usr/sbin/lsof", ["-a", "-p", String(record.pid), "-d", "txt", "-Fn"])
-            let expected = resources.appendingPathComponent(record.kind.binaryName).path
-            if identity.text.components(separatedBy: .newlines).contains("n" + expected) {
-                _ = try await Command.run("/bin/kill", ["-TERM", String(record.pid)])
-                for _ in 0..<30 {
-                    let alive = try await Command.run("/bin/kill", ["-0", String(record.pid)])
-                    if alive.code != 0 { break }
-                    await Task.detached { try? await Task.sleep(nanoseconds: 100_000_000) }.value
-                }
-                let alive = try await Command.run("/bin/kill", ["-0", String(record.pid)])
-                guard alive.code != 0 else { throw ProxyError.message("遗留内核尚未退出，请重试恢复网络") }
-            }
-            try FileManager.default.removeItem(at: pidFile)
+            failures.append("发现旧版 core.pid，无法验证进程启动身份；记录已保留，请核实遗留内核")
         }
-        try? logHandle?.close(); logHandle = nil
+        if !failures.isEmpty { throw ProxyError.message(failures.joined(separator: "；")) }
     }
 
     private var environment: [String: String] {
@@ -142,18 +134,5 @@ final class CoreProcess {
             let r = try await Command.run("/usr/sbin/lsof", ["-nP", "-iTCP:\(Configuration.proxyPort)", "-sTCP:LISTEN", "-t"])
             return !r.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-    }
-
-    private func readRecoveryRecord() throws -> (pid: Int32, kind: KernelKind) {
-        let text = try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("{"),
-           let data = text.data(using: .utf8),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let raw = object["pid"] as? Int, raw > 1 {
-            return (Int32(raw), KernelKind(rawValue: object["kernel"] as? String ?? "") ?? .mihomo)
-        }
-        // Version 0.8 wrote a bare PID and always ran Mihomo.
-        guard let pid = Int32(text), pid > 1 else { throw ProxyError.message("内核 PID 恢复记录无效") }
-        return (pid, .mihomo)
     }
 }

@@ -659,6 +659,7 @@ mod tests {
         ProxyNode {
             id: "id".into(),
             name: "测试节点 · abc123456789".into(),
+            exit_name: "测试节点 · abc123456789".into(),
             source_id: "source".into(),
             payload: payload.as_object().unwrap().clone(),
         }
@@ -738,6 +739,7 @@ mod tests {
         let node = ProxyNode {
             id: "id".into(),
             name: "测试节点 · abc123456789".into(),
+            exit_name: "测试节点 · abc123456789".into(),
             source_id: "source".into(),
             payload: payload.clone(),
         };

@@ -27,6 +27,21 @@ final class RoutingAndTrafficTests: XCTestCase {
         XCTAssertTrue(ModeRanking.best(try pool(), mode: .highSpeed, latencies: [:], measurements: [:]).isEmpty)
         XCTAssertEqual(ThroughputSample(bytesPerSecond: 1_000_000, downloadedBytes: 1_048_576).megabitsPerSecond, 8)
     }
+    func testAllModesPreferNonHongKongWithoutSkippingVerification() {
+        let source = UUID()
+        let hk = ProxyNode(id: "hk", name: "HK01", sourceID: source, payload: [:])
+        let jp = ProxyNode(id: "jp", name: "JP01", sourceID: source, payload: [:])
+        let nodes = [hk, jp]
+        let latencies = ["hk": NodeLatency(milliseconds: 5), "jp": NodeLatency(milliseconds: 90)]
+        var samples = ["hk": LinkMeasurements(throughput: ThroughputSample(bytesPerSecond: 900, downloadedBytes: 1_048_576), openAIReachable: true),
+                       "jp": LinkMeasurements(throughput: ThroughputSample(bytesPerSecond: 100, downloadedBytes: 1_048_576), openAIReachable: true)]
+        for mode in RoutingMode.allCases {
+            XCTAssertEqual(ModeRanking.best(nodes, mode: mode, latencies: latencies, measurements: samples).map(\.id), ["jp", "hk"])
+        }
+        samples["jp"]?.openAIReachable = false
+        XCTAssertEqual(ModeRanking.best(nodes, mode: .ai, latencies: latencies, measurements: samples).map(\.id), ["hk"])
+        XCTAssertTrue(ModeRanking.best(nodes, mode: .ai, latencies: latencies, measurements: [:]).isEmpty)
+    }
     func testActualDialerReferencesBecomeOrderedHops() throws {
         let raw = try pool()
         var middle = raw[1].payload; middle["name"] = "AUTO-middle"; middle["dialer-proxy"] = raw[0].name

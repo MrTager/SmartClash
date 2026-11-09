@@ -113,6 +113,7 @@ pub fn parse_detailed(text: &str, source: &Source) -> Result<ParseOutcome, Strin
 
         nodes.push(ProxyNode {
             id: fingerprint,
+            exit_name: name.clone(),
             name,
             source_id: source.id.clone(),
             payload,

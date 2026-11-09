@@ -52,6 +52,191 @@ final class GlobeAndTrafficTests: XCTestCase {
         XCTAssertTrue(stopped.routes.isEmpty)
     }
     @MainActor
+    func testSwitchingExitUpdatesActiveMarkersAndFollowsNewNode() {
+        _ = NSApplication.shared
+        let a = ProxyNode(id: "A", name: "A", sourceID: UUID(), payload: ["server": "a.example.test"])
+        let b = ProxyNode(id: "B", name: "B", sourceID: UUID(), payload: ["server": "b.example.test"])
+        let nodes = [a, b]
+        let aLocation = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let bLocation = GeoLocation(latitude: 1, longitude: 103, country: "Singapore")
+        let locations = ["a.example.test": aLocation, "b.example.test": bLocation]
+        let oldConnection = CoreConnection(id: "old", metadata: ConnectionMetadata(destinationIP: "1.1.1.1"), chains: [a.name])
+        let first = GlobeSnapshot.make(nodes: nodes, activeTrace: .resolve(selected: a.name, rawNodes: nodes, definitions: []),
+            connections: [oldConnection], locations: locations, focusedConnection: nil)
+        let globe = GlobeScene()
+        globe.update(first, animate: false)
+        XCTAssertEqual(first.selectedNodeID, a.id)
+        XCTAssertEqual(first.selectedLocation, aLocation)
+        XCTAssertEqual(first.markers.filter(\.active).map(\.name), [a.name])
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(aLocation) * 3.9), 0.0001)
+        globe.rotateCamera(horizontal: 100, vertical: 20)
+
+        let second = GlobeSnapshot.make(nodes: nodes, activeTrace: .resolve(selected: b.name, rawNodes: nodes, definitions: []),
+            connections: [oldConnection], locations: locations, focusedConnection: nil)
+        globe.update(second, animate: false)
+        XCTAssertEqual(second.selectedNodeID, b.id)
+        XCTAssertEqual(second.selectedLocation, bLocation)
+        XCTAssertEqual(second.mappedNodes, 2)
+        XCTAssertEqual(second.markers.filter(\.active).map(\.name), [b.name])
+        XCTAssertEqual(second.markers.first(where: { $0.name == a.name })?.active, false)
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(bLocation) * 3.9), 0.0001)
+    }
+    @MainActor
+    func testMultihopCameraFollowsLastHopInsteadOfFirstActiveMarker() {
+        _ = NSApplication.shared
+        let entry = ProxyNode(id: "entry", name: "Entry", sourceID: UUID(), payload: ["server": "a-entry.example.test"])
+        let exit = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "z-exit.example.test", "dialer-proxy": entry.name])
+        let nodes = [entry, exit]
+        let entryLocation = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let exitLocation = GeoLocation(latitude: 1, longitude: 103, country: "Singapore")
+        let trace = ChainTrace.resolve(selected: exit.name, rawNodes: nodes, definitions: [])
+        let snapshot = GlobeSnapshot.make(nodes: nodes, activeTrace: trace, connections: [],
+            locations: ["a-entry.example.test": entryLocation, "z-exit.example.test": exitLocation], focusedConnection: nil)
+        XCTAssertEqual(trace.hops.map(\.id), [entry.id, exit.id])
+        XCTAssertEqual(snapshot.markers.first(where: { $0.active })?.name, entry.name)
+        XCTAssertEqual(snapshot.selectedNodeID, exit.id)
+        XCTAssertEqual(snapshot.selectedLocation, exitLocation)
+        XCTAssertEqual(snapshot.routes.first?.locations, [entryLocation, exitLocation])
+        let globe = GlobeScene()
+        globe.update(snapshot, animate: false)
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(exitLocation) * 3.9), 0.0001)
+    }
+    @MainActor
+    func testMissingExitLocationNeverFallsBackAndFollowsWhenItArrives() {
+        _ = NSApplication.shared
+        let a = ProxyNode(id: "A", name: "A", sourceID: UUID(), payload: ["server": "a.example.test"])
+        let entry = ProxyNode(id: "entry", name: "Entry", sourceID: UUID(), payload: ["server": "entry.example.test"])
+        let b = ProxyNode(id: "B", name: "B", sourceID: UUID(), payload: ["server": "b.example.test", "dialer-proxy": entry.name])
+        let nodes = [a, entry, b]
+        let aLocation = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let entryLocation = GeoLocation(latitude: 1, longitude: 103, country: "Singapore")
+        let bLocation = GeoLocation(latitude: 37, longitude: -122, country: "USA")
+        var locations = ["a.example.test": aLocation, "entry.example.test": entryLocation]
+        let globe = GlobeScene()
+        globe.update(GlobeSnapshot.make(nodes: nodes, activeTrace: .resolve(selected: a.name, rawNodes: nodes, definitions: []),
+            connections: [], locations: locations, focusedConnection: nil), animate: false)
+        globe.rotateCamera(horizontal: 100, vertical: 30)
+        let manualPosition = globe.camera.simdPosition
+        let trace = ChainTrace.resolve(selected: b.name, rawNodes: nodes, definitions: [])
+        let pending = GlobeSnapshot.make(nodes: nodes, activeTrace: trace, connections: [], locations: locations, focusedConnection: nil)
+        XCTAssertEqual(pending.selectedNodeID, b.id)
+        XCTAssertNil(pending.selectedLocation)
+        XCTAssertEqual(pending.markers.first(where: { $0.name == a.name })?.active, false)
+        XCTAssertEqual(pending.markers.first(where: { $0.name == entry.name })?.active, true)
+        XCTAssertTrue(pending.routes.isEmpty)
+        globe.update(pending, animate: false)
+        XCTAssertEqual(globe.camera.simdPosition, manualPosition)
+        XCTAssertGreaterThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(aLocation) * 3.9), 0.1)
+        XCTAssertGreaterThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(entryLocation) * 3.9), 0.1)
+
+        locations["b.example.test"] = bLocation
+        let resolved = GlobeSnapshot.make(nodes: nodes, activeTrace: trace, connections: [], locations: locations, focusedConnection: nil)
+        XCTAssertEqual(resolved.selectedNodeID, pending.selectedNodeID)
+        XCTAssertEqual(resolved.selectedLocation, bLocation)
+        globe.update(resolved, animate: false)
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(bLocation) * 3.9), 0.0001)
+    }
+    @MainActor
+    func testSameExitPollingAndAnimationChangesPreserveManualCamera() {
+        _ = NSApplication.shared
+        let node = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "exit.example.test"])
+        let trace = ChainTrace.resolve(selected: node.name, rawNodes: [node], definitions: [])
+        let locations = ["exit.example.test": GeoLocation(latitude: 35, longitude: 139, country: "Japan"),
+                         "1.1.1.1": GeoLocation(latitude: -27, longitude: 153, country: "Australia")]
+        let first = GlobeSnapshot.make(nodes: [node], activeTrace: trace, connections: [], locations: locations, focusedConnection: nil)
+        let globe = GlobeScene()
+        globe.update(first, animate: false)
+        globe.rotateCamera(horizontal: 140, vertical: 30)
+        globe.zoomCamera(by: -0.2)
+        let manualPosition = globe.camera.simdPosition
+        let manualOrientation = globe.camera.simdOrientation
+        for index in 0..<3 {
+            let connection = CoreConnection(id: "request-\(index)", metadata: ConnectionMetadata(destinationIP: "1.1.1.1"), chains: [node.name])
+            let polled = GlobeSnapshot.make(nodes: [node], activeTrace: trace, connections: [connection], locations: locations, focusedConnection: connection.id)
+            XCTAssertNotEqual(polled, first)
+            XCTAssertEqual(polled.selectedNodeID, first.selectedNodeID)
+            XCTAssertEqual(polled.selectedLocation, first.selectedLocation)
+            globe.update(polled, animate: true)
+            globe.update(polled, animate: false)
+            XCTAssertEqual(globe.camera.simdPosition, manualPosition)
+            XCTAssertEqual(globe.camera.simdOrientation.vector, manualOrientation.vector)
+        }
+    }
+    @MainActor
+    func testSwitchingNodeIDsOnSharedServerStillFollowsExit() {
+        _ = NSApplication.shared
+        let a = ProxyNode(id: "A", name: "A", sourceID: UUID(), payload: ["server": "shared.example.test"])
+        let b = ProxyNode(id: "B", name: "B", sourceID: UUID(), payload: ["server": "shared.example.test"])
+        let nodes = [a, b]
+        let location = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let first = GlobeSnapshot.make(nodes: nodes, activeTrace: .resolve(selected: a.name, rawNodes: nodes, definitions: []),
+            connections: [], locations: ["shared.example.test": location], focusedConnection: nil)
+        let second = GlobeSnapshot.make(nodes: nodes, activeTrace: .resolve(selected: b.name, rawNodes: nodes, definitions: []),
+            connections: [], locations: ["shared.example.test": location], focusedConnection: nil)
+        XCTAssertEqual(first.selectedNodeID, a.id)
+        XCTAssertEqual(second.selectedNodeID, b.id)
+        XCTAssertEqual(first.selectedLocation, second.selectedLocation)
+        XCTAssertEqual(second.markers.count, 1)
+        XCTAssertEqual(second.markers.first?.name, b.name)
+        XCTAssertEqual(second.markers.first?.active, true)
+        let globe = GlobeScene()
+        globe.update(first, animate: false)
+        globe.rotateCamera(horizontal: 140, vertical: 30)
+        XCTAssertGreaterThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(location) * 3.9), 0.1)
+        globe.update(second, animate: false)
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(location) * 3.9), 0.0001)
+    }
+    @MainActor
+    func testChangedLocationForSameExitRefocusesCamera() {
+        _ = NSApplication.shared
+        let node = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "exit.example.test"])
+        let trace = ChainTrace.resolve(selected: node.name, rawNodes: [node], definitions: [])
+        let original = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let updated = GeoLocation(latitude: 1, longitude: 103, country: "Singapore")
+        let first = GlobeSnapshot.make(nodes: [node], activeTrace: trace, connections: [], locations: ["exit.example.test": original], focusedConnection: nil)
+        let second = GlobeSnapshot.make(nodes: [node], activeTrace: trace, connections: [], locations: ["exit.example.test": updated], focusedConnection: nil)
+        XCTAssertEqual(first.selectedNodeID, second.selectedNodeID)
+        let globe = GlobeScene()
+        globe.update(first, animate: false)
+        globe.rotateCamera(horizontal: 140, vertical: 30)
+        globe.update(second, animate: false)
+        XCTAssertLessThan(simd_distance(globe.camera.simdPosition, GlobeScene.position(updated) * 3.9), 0.0001)
+    }
+    @MainActor
+    func testIncompleteUnknownOrInvalidExitDoesNotProvideFocusLocation() {
+        _ = NSApplication.shared
+        let entry = ProxyNode(id: "entry", name: "Entry", sourceID: UUID(), payload: ["server": "entry.example.test"])
+        let exit = ProxyNode(id: "exit", name: "Exit", sourceID: UUID(), payload: ["server": "exit.example.test", "dialer-proxy": entry.name])
+        let nodes = [entry, exit]
+        let trace = ChainTrace.resolve(selected: exit.name, rawNodes: nodes, definitions: [])
+        let location = GeoLocation(latitude: 35, longitude: 139, country: "Japan")
+        let locations = ["entry.example.test": location, "exit.example.test": location]
+        let incomplete = GlobeSnapshot.make(nodes: nodes, activeTrace: ChainTrace(hops: trace.hops, complete: false),
+            connections: [], locations: locations, focusedConnection: nil)
+        XCTAssertNil(incomplete.selectedNodeID)
+        XCTAssertNil(incomplete.selectedLocation)
+        let sameName = ProxyNode(id: "other-exit", name: exit.name, sourceID: exit.sourceID, payload: exit.payload)
+        let unknown = GlobeSnapshot.make(nodes: [entry, sameName], activeTrace: trace, connections: [], locations: locations, focusedConnection: nil)
+        XCTAssertNil(unknown.selectedNodeID)
+        XCTAssertNil(unknown.selectedLocation)
+        XCTAssertEqual(unknown.markers.first?.active, true)
+        let invalidLocation = GeoLocation(latitude: 91, longitude: 139, country: "")
+        let invalid = GlobeSnapshot.make(nodes: nodes, activeTrace: trace, connections: [],
+            locations: ["entry.example.test": location, "exit.example.test": invalidLocation], focusedConnection: nil)
+        XCTAssertEqual(invalid.selectedNodeID, exit.id)
+        XCTAssertNil(invalid.selectedLocation)
+        let globe = GlobeScene()
+        globe.rotateCamera(horizontal: 140, vertical: 30)
+        let manualPosition = globe.camera.simdPosition
+        globe.update(incomplete, animate: false)
+        globe.update(unknown, animate: false)
+        var invalidFocus = GlobeSnapshot()
+        invalidFocus.selectedNodeID = exit.id
+        invalidFocus.selectedLocation = invalidLocation
+        globe.update(invalidFocus, animate: false)
+        XCTAssertEqual(globe.camera.simdPosition, manualPosition)
+    }
+    @MainActor
     func testGlobeArcHandlesSameLocationAntipodesAndDateLineWithoutNaN() {
         for (a, b) in [(0.0, 0.0), (0, 180), (179, -179)] {
             let points = GlobeScene.arc(from: GeoLocation(latitude: 0, longitude: a, country: ""), to: GeoLocation(latitude: 0, longitude: b, country: ""))

@@ -85,6 +85,25 @@ pub fn hint(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(12.0).color(MUTED));
 }
 
+/// 单一操作进度入口；仅展示真实的忙碌状态，不影响页面上的停止按钮。
+pub fn operation_progress(ui: &mut Ui, busy: bool, stopping: bool) {
+    if !busy && !stopping {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+        hint(
+            ui,
+            if stopping {
+                "正在停止并恢复网络…"
+            } else {
+                "正在处理，请稍候… 可随时停止并恢复网络"
+            },
+        );
+    });
+    ui.add_space(8.0);
+}
+
 /// 圆角状态胶囊：小圆点 + 文本
 pub fn status_pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) {
     egui::Frame::default()
@@ -803,6 +822,71 @@ mod tests {
             },
         );
         (result.unwrap(), output)
+    }
+
+    fn spinner_count(output: &egui::FullOutput) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(
+                    &shape.shape,
+                    egui::epaint::Shape::Path(path)
+                        if !path.closed && path.points.len() == 20
+                            && path.stroke == egui::epaint::PathStroke::new(3.0_f32, ACCENT)
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn operation_progress_has_one_spinner_and_clears_when_idle() {
+        let ctx = Context::default();
+        for (busy, stopping, expected) in [
+            (false, false, 0),
+            (true, false, 1),
+            (true, true, 1),
+            (false, true, 1),
+            (false, false, 0),
+        ] {
+            let (_, output) = frame(&ctx, 660.0, vec![], |ui| {
+                operation_progress(ui, busy, stopping);
+            });
+            assert_eq!(spinner_count(&output), expected);
+        }
+    }
+
+    #[test]
+    fn operation_progress_keeps_stop_clickable_and_uses_stopping_message() {
+        let ctx = Context::default();
+        let (stop, _) = frame(&ctx, 660.0, vec![], |ui| {
+            operation_progress(ui, true, false);
+            ui.button("停止并恢复网络")
+        });
+        let (stop, _) = frame(&ctx, 660.0, click_events(stop.rect.center()), |ui| {
+            operation_progress(ui, true, false);
+            ui.button("停止并恢复网络")
+        });
+        assert!(stop.enabled() && stop.clicked());
+        let (_, output) = frame(&ctx, 660.0, vec![], |ui| {
+            operation_progress(ui, true, true);
+        });
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::epaint::Shape::Text(text)
+                if text.galley.job.text == "正在停止并恢复网络…"
+        )));
+    }
+
+    #[test]
+    fn operation_progress_is_drawn_once_in_content_not_toolbar_or_chain() {
+        let shell = include_str!("mod.rs");
+        let (toolbar, content) = shell.split_once("egui::CentralPanel::default()").unwrap();
+        assert!(!toolbar.contains("ui.spinner()"));
+        assert!(!toolbar.contains("operation_progress("));
+        assert_eq!(content.matches("widgets::operation_progress(").count(), 1);
+        assert!(!include_str!("chain.rs").contains("ui.spinner()"));
+        assert!(!include_str!("chain.rs").contains("operation_progress("));
     }
 
     fn click_events(pos: Pos2) -> Vec<Event> {

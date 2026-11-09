@@ -41,7 +41,9 @@ pub struct ViewState {
     pub globe_yaw: f32,
     pub globe_pitch: f32,
     pub globe_distance: f32,
-    pub globe_had_markers: bool,
+    pub globe_selected_node: Option<String>,
+    pub globe_selected_location: Option<(f32, f32)>,
+    pub globe_route_ids: Vec<String>,
     pub focused_connection: Option<String>,
     pub show_connections: bool,
     pub globe_texture: Option<egui::TextureHandle>,
@@ -62,7 +64,9 @@ impl Default for ViewState {
             globe_yaw: DEFAULT_GLOBE_LON,
             globe_pitch: DEFAULT_GLOBE_LAT,
             globe_distance: 3.9,
-            globe_had_markers: false,
+            globe_selected_node: None,
+            globe_selected_location: None,
+            globe_route_ids: Vec::new(),
             focused_connection: None,
             show_connections: false,
             globe_texture: None,
@@ -190,10 +194,6 @@ pub fn draw(
                         if widgets::accent_button(ui, "更新订阅", can_refresh) {
                             pending.push(Action::Refresh);
                         }
-                        if store.busy {
-                            ui.add_space(6.0);
-                            ui.spinner();
-                        }
                     });
                 });
                 ui.add_space(6.0);
@@ -217,6 +217,8 @@ pub fn draw(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(8.0);
+                    // 所有页面共用内容区的一个进度提示，工具栏和子页面不再重复绘制。
+                    widgets::operation_progress(ui, store.busy, store.stopping);
                     match view.section {
                         Section::Overview => overview::draw(view, store, ui, pending),
                         Section::Subscriptions => subscriptions::draw(view, store, ui, pending),
