@@ -14,16 +14,22 @@ pub fn draw(
         ui.vertical(|ui| {
             ui.label(RichText::new("链路运行情况").size(24.0).strong().color(widgets::TEXT));
             ui.add_space(4.0);
-            let (fg, bg) = if store.running {
-                if store.routing_status == "已打通" {
-                    (widgets::GOOD, widgets::GOOD_DIM)
-                } else {
-                    (widgets::WARN, widgets::WARN_DIM)
-                }
+            let failed = store.running && store.internet_status.contains("出网失败");
+            let label = if failed {
+                "当前链路出网失败 · 正在检查备用"
             } else {
-                (MUTED, widgets::MUTED_DIM)
+                &store.routing_status
             };
-            widgets::status_pill(ui, &store.routing_status, fg, bg);
+            let (fg, bg) = if !store.running {
+                (MUTED, widgets::MUTED_DIM)
+            } else if failed {
+                (widgets::BAD, widgets::BAD_DIM)
+            } else if store.routing_status == "已打通" {
+                (widgets::GOOD, widgets::GOOD_DIM)
+            } else {
+                (widgets::WARN, widgets::WARN_DIM)
+            };
+            widgets::status_pill(ui, label, fg, bg);
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if store.running || store.busy || store.recovery {

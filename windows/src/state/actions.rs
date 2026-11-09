@@ -1823,7 +1823,12 @@ pub fn start_monitor(shared: &Shared) {
         if flag.load(Ordering::SeqCst) {
             break;
         }
-        if busy || testing {
+        // 等待期间可能启动选路；必须重新读取状态，避免监控与验证并发改写同一链路。
+        if busy || testing
+            || with_store(&shared, |store| {
+                store.busy || store.is_testing_latency || !store.running || store.stopping
+            })
+        {
             continue;
         }
         let _ = do_inspect(&shared, false);

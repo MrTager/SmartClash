@@ -527,6 +527,8 @@ pub fn routing_selector(
             store.preferences.traffic_mode.uses_proxy(),
             store.preferences.mode(),
             store.active_mode,
+            &store.routing_status,
+            &store.internet_status,
         ),
     );
 }
@@ -538,6 +540,8 @@ fn routing_status_text(
     uses_proxy: bool,
     selected: crate::logic::model::RoutingMode,
     active: Option<crate::logic::model::RoutingMode>,
+    routing_status: &str,
+    internet_status: &str,
 ) -> String {
     let state = if stopping {
         "正在停止并恢复网络".into()
@@ -548,7 +552,13 @@ fn routing_status_text(
     } else if !uses_proxy {
         "当前直连 · 不使用代理链路".into()
     } else if let Some(active) = active {
-        format!("当前生效：{}", active.title())
+        if internet_status.contains("出网失败") {
+            format!("当前配置：{} · 出网失败，正在检查备用", active.title())
+        } else if routing_status == "已打通" {
+            format!("当前生效：{}", active.title())
+        } else {
+            format!("当前配置：{} · 正在重新验证", active.title())
+        }
     } else {
         "当前链路尚未验证".into()
     };
@@ -581,6 +591,8 @@ fn routing_status_row(store: &crate::state::Store, ui: &mut Ui, pending: &mut Ve
                 store.preferences.traffic_mode.uses_proxy(),
                 store.preferences.mode(),
                 store.active_mode,
+                &store.routing_status,
+                &store.internet_status,
             ),
         );
     });
@@ -987,18 +999,32 @@ mod tests {
     #[test]
     fn routing_status_distinguishes_pending_direct_stopped_and_recovery() {
         use crate::logic::model::RoutingMode::{Ai, LowLatency};
-        let pending = routing_status_text(true, false, false, true, Ai, Some(LowLatency));
+        let pending = routing_status_text(
+            true, false, false, true, Ai, Some(LowLatency), "已打通", "HTTPS 出网正常",
+        );
         assert!(pending.contains("当前生效：低延迟链路"));
         assert!(pending.contains("已选AI 链路，待重新选路"));
-        let active = routing_status_text(true, false, false, true, Ai, Some(Ai));
+        let active = routing_status_text(
+            true, false, false, true, Ai, Some(Ai), "已打通", "HTTPS 出网正常",
+        );
         assert!(!active.contains("待重新选路"));
+        let verifying = routing_status_text(
+            true, false, false, true, Ai, Some(Ai), "正在验证AI 链路", "HTTPS 出网正常",
+        );
+        assert!(verifying.contains("当前配置：AI 链路 · 正在重新验证"));
+        let failed = routing_status_text(
+            true, false, false, true, Ai, Some(Ai), "已打通", "当前线路出网失败，正在检查备用",
+        );
+        assert!(failed.contains("当前配置：AI 链路 · 出网失败"));
         for (running, stopping, recovery, uses_proxy, expected) in [
             (true, false, false, false, "当前直连"),
             (false, false, false, true, "内核已停止"),
             (true, true, false, true, "正在停止并恢复网络"),
             (true, false, true, true, "网络设置待恢复"),
         ] {
-            let text = routing_status_text(running, stopping, recovery, uses_proxy, Ai, None);
+            let text = routing_status_text(
+                running, stopping, recovery, uses_proxy, Ai, None, "尚未打通", "未连接",
+            );
             assert!(text.contains(expected));
             assert!(!text.contains("当前生效"));
             assert!(!text.contains("待重新选路"));
