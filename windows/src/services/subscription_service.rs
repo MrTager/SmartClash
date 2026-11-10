@@ -1,6 +1,6 @@
+use crate::logic::model::ProxyNode;
 use crate::logic::model::{proxy_port, Source};
 use crate::logic::subscription;
-use crate::logic::model::ProxyNode;
 use crate::services::{command, paths};
 use std::path::Path;
 
@@ -63,7 +63,10 @@ pub fn update(sources: &[Source], through_proxy: bool) -> Result<SubscriptionUpd
             continue;
         }
 
-        let temp = root.join(format!("download-{}.tmp", crate::logic::model::random_hex(8)));
+        let temp = root.join(format!(
+            "download-{}.tmp",
+            crate::logic::model::random_hex(8)
+        ));
         let mut args: Vec<String> = vec![
             "--fail".into(),
             "--silent".into(),

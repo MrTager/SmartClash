@@ -3,7 +3,7 @@
 use super::configuration::BuiltConfig;
 use super::convert;
 use super::kernel::{KernelKind, XRAY_API_PORT, XRAY_SOCKS_PORT};
-use super::model::{ProxyNode, TrafficMode, PROBE_PORT, proxy_port};
+use super::model::{proxy_port, ProxyNode, TrafficMode, PROBE_PORT};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
@@ -29,7 +29,10 @@ fn unique_supported<'a>(kind: KernelKind, list: &'a [ProxyNode]) -> (Vec<&'a Pro
 }
 
 fn warning_for(kind: KernelKind, nodes: &[ProxyNode]) -> Option<String> {
-    let skipped = nodes.iter().filter(|node| !kind.supports_node(node)).count();
+    let skipped = nodes
+        .iter()
+        .filter(|node| !kind.supports_node(node))
+        .count();
     if skipped == 0 {
         None
     } else {
@@ -223,7 +226,8 @@ pub fn build_singbox(
             }
         }
     });
-    let data = serde_json::to_vec_pretty(&config).map_err(|e| format!("生成 sing-box 配置失败：{e}"))?;
+    let data =
+        serde_json::to_vec_pretty(&config).map_err(|e| format!("生成 sing-box 配置失败：{e}"))?;
     Ok(BuiltConfig { data, warnings })
 }
 
@@ -285,9 +289,7 @@ pub fn build_xray(
         "direct".into()
     };
 
-    let mut rules = vec![
-        json!({ "type": "field", "inboundTag": ["api"], "outboundTag": "api" }),
-    ];
+    let mut rules = vec![json!({ "type": "field", "inboundTag": ["api"], "outboundTag": "api" })];
     if traffic_mode == TrafficMode::Rule {
         rules.push(json!({
             "type": "field",
@@ -359,7 +361,8 @@ pub fn build_xray(
         }
     });
     let _ = secret; // Xray 不使用 Clash 控制密钥。
-    let data = serde_json::to_vec_pretty(&config).map_err(|e| format!("生成 Xray 配置失败：{e}"))?;
+    let data =
+        serde_json::to_vec_pretty(&config).map_err(|e| format!("生成 Xray 配置失败：{e}"))?;
     Ok(BuiltConfig { data, warnings })
 }
 
@@ -452,11 +455,30 @@ proxies:
             url: "https://example.com/sub".into(),
         };
         let nodes = parse(yaml, &source).expect("parse sample subscription");
-        let built = build_xray(&nodes, "secret", false, None, &[], None, None, TrafficMode::Direct)
-            .expect("direct-mode config should still build");
+        let built = build_xray(
+            &nodes,
+            "secret",
+            false,
+            None,
+            &[],
+            None,
+            None,
+            TrafficMode::Direct,
+        )
+        .expect("direct-mode config should still build");
         assert!(!built.warnings.is_empty());
         assert!(
-            build_xray(&nodes, "secret", false, None, &[], None, None, TrafficMode::Global).is_err(),
+            build_xray(
+                &nodes,
+                "secret",
+                false,
+                None,
+                &[],
+                None,
+                None,
+                TrafficMode::Global
+            )
+            .is_err(),
             "proxy mode without supported nodes must fail clearly"
         );
     }
@@ -471,9 +493,17 @@ proxies:
             return;
         }
         let nodes = sample_nodes();
-        let built =
-            build_singbox(&nodes, "secret", false, None, &[], None, None, TrafficMode::Rule)
-                .expect("build config");
+        let built = build_singbox(
+            &nodes,
+            "secret",
+            false,
+            None,
+            &[],
+            None,
+            None,
+            TrafficMode::Rule,
+        )
+        .expect("build config");
         let dir = test_dir("singbox-run");
         let path = dir.join("config.json");
         std::fs::write(&path, &built.data).expect("write config");
@@ -526,9 +556,17 @@ proxies:
             return;
         }
         let nodes = sample_nodes();
-        let built =
-            build_xray(&nodes, "secret", false, None, &[], None, None, TrafficMode::Rule)
-                .expect("build config");
+        let built = build_xray(
+            &nodes,
+            "secret",
+            false,
+            None,
+            &[],
+            None,
+            None,
+            TrafficMode::Rule,
+        )
+        .expect("build config");
         let dir = test_dir("xray-run");
         let path = dir.join("config.json");
         std::fs::write(&path, &built.data).expect("write config");
@@ -558,8 +596,7 @@ proxies:
         assert!(ready, "Xray 未监听 API 端口");
         let output = output.expect("call xray stats api");
         assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains("stat"),
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("stat"),
             "Xray Stats API 调用失败：{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -610,7 +647,13 @@ proxies:
         let mut cmd = Command::new(&exe);
         match kind {
             KernelKind::Mihomo => {
-                cmd.args(["-t", "-d", dir.to_str().unwrap(), "-f", path.to_str().unwrap()]);
+                cmd.args([
+                    "-t",
+                    "-d",
+                    dir.to_str().unwrap(),
+                    "-f",
+                    path.to_str().unwrap(),
+                ]);
             }
             KernelKind::SingBox => {
                 cmd.args([
@@ -646,9 +689,7 @@ fn apply_xray_interface(outbound: &mut Value, interface: &str) {
     let Some(object) = outbound.as_object_mut() else {
         return;
     };
-    let stream = object
-        .entry("streamSettings")
-        .or_insert_with(|| json!({}));
+    let stream = object.entry("streamSettings").or_insert_with(|| json!({}));
     let Some(stream) = stream.as_object_mut() else {
         return;
     };
@@ -672,10 +713,7 @@ pub fn probe_config(kind: KernelKind, node: &ProxyNode, port: u16) -> Result<Vec
                 "proxies".into(),
                 json!([Value::Object(node.payload.clone())]),
             );
-            obj.insert(
-                "rules".into(),
-                json!([format!("MATCH,{}", node.name)]),
-            );
+            obj.insert("rules".into(), json!([format!("MATCH,{}", node.name)]));
             serde_json::to_vec_pretty(&Value::Object(obj))
                 .map_err(|e| format!("生成探测配置失败：{e}"))
         }

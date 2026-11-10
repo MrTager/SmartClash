@@ -12,7 +12,12 @@ pub fn draw(
 ) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new("链路运行情况").size(24.0).strong().color(widgets::TEXT));
+            ui.label(
+                RichText::new("链路运行情况")
+                    .size(24.0)
+                    .strong()
+                    .color(widgets::TEXT),
+            );
             ui.add_space(4.0);
             let failed = store.running && store.internet_status.contains("出网失败");
             let label = if failed {
@@ -140,11 +145,7 @@ pub fn draw(
 }
 
 fn arrow(ui: &mut Ui) {
-    ui.label(
-        RichText::new("→")
-            .size(16.0)
-            .color(widgets::ACCENT),
-    );
+    ui.label(RichText::new("→").size(16.0).color(widgets::ACCENT));
 }
 
 fn hop(ui: &mut Ui, title: &str, detail: &str, relay: bool) {
@@ -161,7 +162,12 @@ fn hop(ui: &mut Ui, title: &str, detail: &str, relay: bool) {
         .show(ui, |ui| {
             ui.set_width(150.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new(title).strong().size(13.5).color(widgets::TEXT));
+                ui.label(
+                    RichText::new(title)
+                        .strong()
+                        .size(13.5)
+                        .color(widgets::TEXT),
+                );
                 ui.label(RichText::new(detail).size(11.0).color(MUTED));
             });
         });

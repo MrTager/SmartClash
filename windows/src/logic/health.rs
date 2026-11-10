@@ -10,6 +10,19 @@ pub fn now_ms() -> u64 {
 }
 
 pub const DELAY_TARGET: &str = "https://cp.cloudflare.com/generate_204";
+/// 业务链路固定每 10 秒检测一次；明确断线后立即切换，切换冷却 10 秒。
+pub const MONITOR_INTERVAL_MS: u64 = 10_000;
+pub const FAILOVER_COOLDOWN_MS: u64 = 10_000;
+
+/// 自动重建连接失败后的退避：10 / 20 / 40 / 60 秒。
+pub fn recovery_cooldown_ms(failures: u32) -> u64 {
+    match failures {
+        0 => 10_000,
+        1 => 20_000,
+        2 => 40_000,
+        _ => 60_000,
+    }
+}
 
 /// 与 macOS 版一致：只用字母数字保留，其余全部百分号编码。
 pub fn percent_encode_alphanumeric(text: &str) -> String {
@@ -91,8 +104,14 @@ impl HealthPolicy {
         )
     }
 
-    pub fn should_failover(failures: u32, last_switch: u64, now: u64, threshold: u32) -> bool {
-        failures >= threshold && now.saturating_sub(last_switch) >= 30_000
+    pub fn should_failover(
+        failures: u32,
+        last_switch: u64,
+        now: u64,
+        threshold: u32,
+        cooldown_ms: u64,
+    ) -> bool {
+        failures >= threshold && now.saturating_sub(last_switch) >= cooldown_ms
     }
 }
 
@@ -101,7 +120,11 @@ pub struct InternetPolicy;
 impl InternetPolicy {
     pub fn classify(code: i64, elapsed: i64) -> ProbeResult {
         ProbeResult::new(
-            if code == 204 { Health::Healthy } else { Health::Offline },
+            if code == 204 {
+                Health::Healthy
+            } else {
+                Health::Offline
+            },
             elapsed,
             if code == 204 {
                 "HTTPS 出网正常".to_string()
@@ -122,7 +145,7 @@ impl StandbyPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::HealthPolicy;
+    use super::{recovery_cooldown_ms, HealthPolicy, FAILOVER_COOLDOWN_MS, MONITOR_INTERVAL_MS};
     use crate::logic::model::Health;
 
     #[test]
@@ -150,5 +173,34 @@ mod tests {
     fn rate_limit_is_not_a_failure() {
         let result = HealthPolicy::classify(429, r#"{"error":{"message":"rate limit"}}"#, 50);
         assert_eq!(result.health, Health::Limited);
+    }
+
+    #[test]
+    fn ten_second_monitor_and_immediate_failover() {
+        assert_eq!(MONITOR_INTERVAL_MS, 10_000);
+        assert_eq!(recovery_cooldown_ms(0), 10_000);
+        assert_eq!(recovery_cooldown_ms(1), 20_000);
+        assert_eq!(recovery_cooldown_ms(3), 60_000);
+        assert!(HealthPolicy::should_failover(
+            1,
+            0,
+            1_000_000,
+            1,
+            FAILOVER_COOLDOWN_MS
+        ));
+        assert!(!HealthPolicy::should_failover(
+            1,
+            0,
+            9_000,
+            1,
+            FAILOVER_COOLDOWN_MS
+        ));
+        assert!(!HealthPolicy::should_failover(
+            0,
+            0,
+            1_000_000,
+            1,
+            FAILOVER_COOLDOWN_MS
+        ));
     }
 }

@@ -10,7 +10,10 @@ use std::os::windows::{io::AsRawHandle, process::CommandExt};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -870,73 +873,101 @@ fn validate_tun_config(kind: KernelKind, data: &[u8]) -> Result<(), String> {
     // 不把用户可变配置当管理员通用执行器；拒绝外部文件、脚本和可重定向输出。
     fn safe(value: &serde_json::Value, kind: KernelKind, context: &str) -> Result<(), String> {
         match value {
-            serde_json::Value::Object(map) => for (key, value) in map {
-                let location = format!("{context}/{key}");
-                if key == "path" {
-                    let parts: Vec<_> = context.split('/').skip(1).collect();
-                    let transport = parts.len() == 3 && parts[1].parse::<usize>().is_ok()
-                        && match kind {
-                            KernelKind::Mihomo => parts[0] == "proxies"
-                                && ["ws-opts", "http-opts", "h2-opts"].contains(&parts[2]),
-                            KernelKind::SingBox => parts[0] == "outbounds" && parts[2] == "transport"
-                                && map.get("type").and_then(|v| v.as_str())
-                                    .map(|v| ["ws", "http", "httpupgrade"].contains(&v)).unwrap_or(false),
-                            _ => false,
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    let location = format!("{context}/{key}");
+                    if key == "path" {
+                        let parts: Vec<_> = context.split('/').skip(1).collect();
+                        let transport = parts.len() == 3
+                            && parts[1].parse::<usize>().is_ok()
+                            && match kind {
+                                KernelKind::Mihomo => {
+                                    parts[0] == "proxies"
+                                        && ["ws-opts", "http-opts", "h2-opts"].contains(&parts[2])
+                                }
+                                KernelKind::SingBox => {
+                                    parts[0] == "outbounds"
+                                        && parts[2] == "transport"
+                                        && map
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .map(|v| ["ws", "http", "httpupgrade"].contains(&v))
+                                            .unwrap_or(false)
+                                }
+                                _ => false,
+                            };
+                        let url_path = |v: &serde_json::Value| {
+                            v.as_str()
+                                .map(|path| {
+                                    path.starts_with('/')
+                                        && !path.starts_with("//")
+                                        && !path.contains('\\')
+                                })
+                                .unwrap_or(false)
                         };
-                    let url_path = |v: &serde_json::Value| v.as_str().map(|path| {
-                        path.starts_with('/') && !path.starts_with("//") && !path.contains('\\')
-                    }).unwrap_or(false);
-                    let allowed = if transport {
-                        url_path(value) || (kind == KernelKind::Mihomo && parts[2] == "http-opts"
-                            && value.as_array().map(|paths| paths.iter().all(url_path)).unwrap_or(false))
-                    } else {
-                        kind == KernelKind::Mihomo && parts.len() == 2 && parts[0] == "rule-providers"
-                            && ["cn-domains", "cn-custom", "cn-ips"].contains(&parts[1])
-                            && value.as_str() == Some(format!("./rules/{}.yaml", parts[1]).as_str())
-                    };
-                    if !allowed {
+                        let allowed = if transport {
+                            url_path(value)
+                                || (kind == KernelKind::Mihomo
+                                    && parts[2] == "http-opts"
+                                    && value
+                                        .as_array()
+                                        .map(|paths| paths.iter().all(url_path))
+                                        .unwrap_or(false))
+                        } else {
+                            kind == KernelKind::Mihomo
+                                && parts.len() == 2
+                                && parts[0] == "rule-providers"
+                                && ["cn-domains", "cn-custom", "cn-ips"].contains(&parts[1])
+                                && value.as_str()
+                                    == Some(format!("./rules/{}.yaml", parts[1]).as_str())
+                        };
+                        if !allowed {
+                            return Err(format!("TUN 配置包含外部路径或执行资源：{location}"));
+                        }
+                        continue;
+                    }
+                    if [
+                        "file",
+                        "proxy-providers",
+                        "hosts",
+                        "ca-cert",
+                        "ca_str",
+                        "ca",
+                        "cert",
+                        "key",
+                        "client-cert",
+                        "client-key",
+                        "certificate-path",
+                        "private-key-path",
+                        "command",
+                        "script",
+                        "plugin",
+                        "plugin-opts",
+                        "external-ui",
+                        "external-ui-url",
+                        "external-ui-name",
+                        "external-controller-unix",
+                        "external-controller-pipe",
+                        "certificate",
+                        "private-key",
+                        "certificate_path",
+                        "key_path",
+                        "output",
+                        "cache_file",
+                    ]
+                    .contains(&key.as_str())
+                    {
                         return Err(format!("TUN 配置包含外部路径或执行资源：{location}"));
                     }
-                    continue;
+                    safe(value, kind, &location)?;
                 }
-                if [
-                    "file",
-                    "proxy-providers",
-                    "hosts",
-                    "ca-cert",
-                    "ca_str",
-                    "ca",
-                    "cert",
-                    "key",
-                    "client-cert",
-                    "client-key",
-                    "certificate-path",
-                    "private-key-path",
-                    "command",
-                    "script",
-                    "plugin",
-                    "plugin-opts",
-                    "external-ui",
-                    "external-ui-url",
-                    "external-ui-name",
-                    "external-controller-unix",
-                    "external-controller-pipe",
-                    "certificate",
-                    "private-key",
-                    "certificate_path",
-                    "key_path",
-                    "output",
-                    "cache_file",
-                ]
-                .contains(&key.as_str()) {
-                    return Err(format!("TUN 配置包含外部路径或执行资源：{location}"));
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    safe(value, kind, &format!("{context}/{index}"))?;
                 }
-                safe(value, kind, &location)?;
-            },
-            serde_json::Value::Array(values) => for (index, value) in values.iter().enumerate() {
-                safe(value, kind, &format!("{context}/{index}"))?;
-            },
-            _ => {},
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1028,11 +1059,21 @@ fn cleanup(session: &Session) -> Result<(), String> {
             let expected_exe = if resource.tun {
                 admin_directory(&resource)?.join(resource.kind.binary_name())
             } else {
-                let beside = session.owner.exe.parent().ok_or("记录程序缺少父目录")?
-                    .join("resources").join(resource.kind.binary_name());
+                let beside = session
+                    .owner
+                    .exe
+                    .parent()
+                    .ok_or("记录程序缺少父目录")?
+                    .join("resources")
+                    .join(resource.kind.binary_name());
                 let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("resources").join(resource.kind.binary_name());
-                if native::same_path(&core.exe, &dev) { dev } else { beside }
+                    .join("resources")
+                    .join(resource.kind.binary_name());
+                if native::same_path(&core.exe, &dev) {
+                    dev
+                } else {
+                    beside
+                }
             };
             #[cfg(test)]
             let expected_exe = session.owner.exe.clone();

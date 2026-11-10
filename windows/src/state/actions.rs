@@ -1,6 +1,8 @@
 use crate::logic::configuration;
 use crate::logic::dynamic_router::{DynamicRouter, RoutePlan};
-use crate::logic::health::{now_ms, HealthPolicy};
+use crate::logic::health::{
+    now_ms, recovery_cooldown_ms, HealthPolicy, FAILOVER_COOLDOWN_MS, MONITOR_INTERVAL_MS,
+};
 use crate::logic::kernel::{KernelKind, RulesSupport};
 use crate::logic::model::{
     proxy_port, LinkMeasurements, NodeLatency, ProbeResult, ProxyNode, RoutingMode, TrafficMode,
@@ -21,7 +23,30 @@ use crate::state::{with_store, Shared};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const MONITOR_INTERVAL: Duration = Duration::from_millis(MONITOR_INTERVAL_MS);
+
+/// 后台监控发现内核失联或线路整体失效时，交给 UI 线程串行执行恢复，
+/// 避免监控线程和用户主动停止同时改写内核生命周期。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorRecovery {
+    CoreDown,
+    LinkUnavailable,
+}
+
+impl MonitorRecovery {
+    fn label(self) -> &'static str {
+        match self {
+            MonitorRecovery::CoreDown => "内核失联",
+            MonitorRecovery::LinkUnavailable => "线路整体失效",
+        }
+    }
+
+    fn revalidate(self) -> bool {
+        self == MonitorRecovery::LinkUnavailable
+    }
+}
 
 /// 当前内核类型。
 fn kernel_of(shared: &Shared) -> KernelKind {
@@ -157,6 +182,142 @@ where
         with_store(&shared, |store| store.busy = false);
         ctx.request_repaint();
     });
+}
+
+/// 监控线程只投递恢复意图，不直接改动内核生命周期；UI 线程随后串行执行。
+fn request_monitor_recovery(shared: &Shared, kind: MonitorRecovery) {
+    let (queued, ctx) = with_store(shared, |store| {
+        if store.stopping || !store.running || store.pending_recovery.is_some() {
+            return (false, None);
+        }
+        let now = now_ms();
+        if now.saturating_sub(store.last_auto_recovery)
+            < recovery_cooldown_ms(store.auto_recovery_failures)
+        {
+            return (false, None);
+        }
+        store.pending_recovery = Some(kind);
+        if let Some(flag) = &store.monitor_stop {
+            flag.store(true, Ordering::SeqCst);
+        }
+        store.log(&format!(
+            "{}，正在自动恢复连接，无需手动关开代理",
+            kind.label()
+        ));
+        (true, store.egui_ctx.clone())
+    });
+    if queued {
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+    }
+}
+
+pub fn dispatch_monitor_recovery(shared: &Shared, ctx: &egui::Context) {
+    let (pending, stopping, busy) =
+        with_store(shared, |s| (s.pending_recovery, s.stopping, s.busy));
+    if pending.is_none() || stopping || busy {
+        return;
+    }
+    perform(shared, ctx, |shared, _ctx| {
+        let Some(kind) = with_store(shared, |store| {
+            if store.stopping {
+                None
+            } else {
+                store.pending_recovery.take()
+            }
+        }) else {
+            return;
+        };
+        let epoch = with_store(shared, |store| store.epoch);
+        match do_monitor_recovery(shared, kind, epoch) {
+            Ok(()) => with_store(shared, |store| {
+                store.auto_recovery_failures = 0;
+                store.log("自动恢复完成，系统代理已重新开启");
+            }),
+            Err(error) => {
+                with_store(shared, |store| {
+                    store.auto_recovery_failures =
+                        store.auto_recovery_failures.saturating_add(1).min(3);
+                    store.last_auto_recovery = now_ms();
+                    store.log(&format!("自动恢复未完成：{error}；将在冷却后重试"));
+                });
+                fail(shared, error);
+            }
+        }
+    });
+}
+
+fn do_monitor_recovery(shared: &Shared, kind: MonitorRecovery, epoch: u64) -> Result<(), String> {
+    if cancelled(shared, epoch) {
+        return Ok(());
+    }
+    let (running, tun, system_proxy, dynamic, plan, selected, traffic_mode) =
+        with_store(shared, |store| {
+            (
+                store.running,
+                store.tun,
+                store.system_proxy,
+                store.dynamic_mode,
+                store.route_plan.clone(),
+                store.selected.clone(),
+                store.preferences.traffic_mode,
+            )
+        });
+    if !running {
+        return Ok(());
+    }
+    with_store(shared, |store| {
+        store.last_auto_recovery = now_ms();
+        store.failures = 0;
+    });
+    // 重新走一次完整的 stop/start，刷新网卡、路由、DNS 与内核中的旧连接。
+    do_stop(shared)?;
+    if cancelled(shared, epoch) {
+        return Ok(());
+    }
+    with_store(shared, |store| {
+        store.dynamic_mode = dynamic;
+        store.route_plan = plan;
+    });
+    let preferred = if selected.is_empty() {
+        None
+    } else {
+        Some(selected)
+    };
+    do_start(shared, tun, preferred, Purpose::Connection)?;
+    if cancelled(shared, epoch) {
+        return Ok(());
+    }
+    if tun {
+        verify_tun(shared, epoch)?;
+    }
+    if system_proxy {
+        enable_system_proxy(shared, epoch)?;
+    }
+    if kind.revalidate() && traffic_mode.uses_proxy() {
+        do_ensure_route(shared, false, Some(epoch))?;
+    } else if kind.revalidate() || tun {
+        let result = client_of(shared).internet_probe(proxy_port());
+        if result.health != crate::logic::model::Health::Healthy {
+            return Err("自动恢复后业务端口出网验证未通过".into());
+        }
+    }
+    if cancelled(shared, epoch) {
+        return Ok(());
+    }
+    with_store(shared, |store| {
+        store.failures = 0;
+        store.last_switch = now_ms();
+        store.routing_status = if traffic_mode.uses_proxy() {
+            "已打通".into()
+        } else {
+            "直连模式已开启".into()
+        };
+        store.internet_status = "自动恢复完成 · HTTPS 出网已验证".into();
+    });
+    start_monitor(shared);
+    Ok(())
 }
 
 // ---------------------------------------------------------------- 订阅
@@ -419,6 +580,8 @@ pub fn stop_all(shared: &Shared, ctx: &egui::Context) {
         store.stopping = true;
         store.epoch = store.epoch.wrapping_add(1);
         crate::services::workers::invalidate();
+        // 用户主动停止优先于后台自动恢复，避免停止后又把代理打开。
+        store.pending_recovery = None;
     }
     let shared = Arc::clone(shared);
     let ctx = ctx.clone();
@@ -479,9 +642,12 @@ fn do_start(
     };
     let ordered = NodeRanking::connection_candidates(&route_nodes, &latencies, now_ms());
     // Honor an explicit selection; otherwise start on the preferred region even before measurements.
-    let preferred_name = preferred.or_else(|| ordered.iter()
-        .find(|node| kind.supports_node(node))
-        .map(|node| node.name.clone()));
+    let preferred_name = preferred.or_else(|| {
+        ordered
+            .iter()
+            .find(|node| kind.supports_node(node))
+            .map(|node| node.name.clone())
+    });
     let outbound = network::default_interface(tun)?;
     let routes = if plan.candidates.is_empty() || !traffic_mode.uses_proxy() {
         None
@@ -1592,6 +1758,13 @@ fn do_select(shared: &Shared, node: &ProxyNode) -> Result<(), String> {
     Ok(())
 }
 
+/// 故障切换后清掉仍绑定旧出口的 TCP/WebSocket，否则客户端会继续走死线路。
+fn do_failover_select(shared: &Shared, node: &ProxyNode) -> Result<(), String> {
+    do_select(shared, node)?;
+    let _ = client_of(shared).close_connections();
+    Ok(())
+}
+
 fn with_probe<T>(
     shared: &Shared,
     node: &ProxyNode,
@@ -1886,40 +2059,44 @@ pub fn start_monitor(shared: &Shared) {
     }
     let shared = Arc::clone(shared);
     let ctx = ctx.clone();
-    crate::services::workers::spawn(move || loop {
-        let (running, busy, testing, interval) = with_store(&shared, |store| {
-            (
-                store.running,
-                store.busy,
-                store.is_testing_latency,
-                store.preferences.interval.max(1),
-            )
-        });
-        if !running || flag.load(Ordering::SeqCst) || !crate::services::workers::valid() {
-            break;
-        }
-        let seconds = interval;
-        let mut slept = 0u64;
-        while slept < seconds * 1000 {
-            if flag.load(Ordering::SeqCst) {
-                return;
+    std::thread::spawn(move || {
+        let mut deadline = Instant::now() + MONITOR_INTERVAL;
+        loop {
+            let (running, exiting, flag_set) = with_store(&shared, |store| {
+                (store.running, store.exiting, flag.load(Ordering::SeqCst))
+            });
+            if !running || flag_set || exiting || !crate::services::workers::valid() {
+                break;
             }
-            std::thread::sleep(Duration::from_millis(200));
-            slept += 200;
+            let now = Instant::now();
+            if now < deadline {
+                let remaining = deadline - now;
+                std::thread::sleep(remaining.min(Duration::from_millis(200)));
+                continue;
+            }
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            // 等待期间可能启动选路；必须重新读取状态，避免监控与验证并发改写同一链路。
+            let (busy, testing, stopping, still_running) = with_store(&shared, |store| {
+                (
+                    store.busy,
+                    store.is_testing_latency,
+                    store.stopping,
+                    store.running,
+                )
+            });
+            if busy || testing || stopping || !still_running {
+                deadline = Instant::now() + MONITOR_INTERVAL;
+                continue;
+            }
+            if let Err(error) = do_inspect(&shared, false) {
+                log(&shared, &format!("检测失败：{error}"));
+            }
+            // 从检测结束重新计时，保证单线程检测不重叠且实际周期不短于 10 秒。
+            deadline = Instant::now() + MONITOR_INTERVAL;
+            ctx.request_repaint();
         }
-        if flag.load(Ordering::SeqCst) || !crate::services::workers::valid() {
-            break;
-        }
-        // 等待期间可能启动选路；必须重新读取状态，避免监控与验证并发改写同一链路。
-        if busy || testing
-            || with_store(&shared, |store| {
-                store.busy || store.is_testing_latency || !store.running || store.stopping
-            })
-        {
-            continue;
-        }
-        let _ = do_inspect(&shared, false);
-        ctx.request_repaint();
     });
 }
 
@@ -1951,17 +2128,18 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     if !with_store(shared, |s| s.preferences.traffic_mode).uses_proxy() {
         let client = client_of(shared);
         if client.version().is_err() {
-            log(shared, "内核失联，正在恢复系统网络");
-            do_stop(shared)?;
+            request_monitor_recovery(shared, MonitorRecovery::CoreDown);
             return Ok(());
         }
         let internet = client.internet_probe(proxy_port());
-        let text = if internet.health == crate::logic::model::Health::Healthy {
+        let healthy = internet.health == crate::logic::model::Health::Healthy;
+        let text = if healthy {
             format!("直连模式出网正常 · {} ms", internet.milliseconds)
         } else {
-            "直连模式出网失败，请检查本机网络".into()
+            "直连模式出网失败，正在检查本机网络".into()
         };
-        commit(shared, |store| {
+        let mut should_recover = false;
+        with_store(shared, |store| {
             store.internet_status = text;
             store.routing_status = if store.tun || store.system_proxy {
                 "直连模式已开启".into()
@@ -1969,8 +2147,17 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
                 "直连内核运行中".into()
             };
             store.openai_status = "直连模式不检测代理节点".into();
-            store.failures = 0;
+            if healthy {
+                store.failures = 0;
+                store.auto_recovery_failures = 0;
+            } else {
+                store.failures += 1;
+                should_recover = store.failures >= 2;
+            }
         });
+        if should_recover {
+            request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
+        }
         return Ok(());
     }
     let current = with_store(shared, |store| {
@@ -1991,8 +2178,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     let client = client_of(shared);
 
     if client.version().is_err() {
-        log(shared, "内核失联，正在恢复系统网络");
-        do_stop(shared)?;
+        request_monitor_recovery(shared, MonitorRecovery::CoreDown);
         return Ok(());
     }
     if dynamic && with_store(shared, |s| s.routing_status != "已打通") {
@@ -2043,6 +2229,7 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     if health.health == crate::logic::model::Health::Healthy {
         commit(shared, |store| {
             store.failures = 0;
+            store.auto_recovery_failures = 0;
             if store.dynamic_mode && store.routing_status != "已打通" {
                 store.routing_status = "已打通".into();
             }
@@ -2066,26 +2253,36 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     if dynamic {
         if let Some(backup) = with_store(shared, |store| store.fresh_standbys().into_iter().next())
         {
-            do_select(shared, &backup)?;
-            commit(shared, |store| store.routing_status = "已打通".into());
-            log(
-                shared,
-                "主线路失效，已切换到预热备用线路；已有请求可能需要重试",
-            );
+            match do_failover_select(shared, &backup) {
+                Ok(()) => {
+                    let verified = client_of(shared).internet_probe(proxy_port());
+                    if verified.health == crate::logic::model::Health::Healthy {
+                        with_store(shared, |store| {
+                            store.routing_status = "已打通".into();
+                            store.internet_status =
+                                format!("HTTPS 出网已验证 · {} ms", verified.milliseconds);
+                        });
+                        log(shared, "主线路失效，已切换到预热备用线路；旧连接已清理");
+                        return Ok(());
+                    }
+                }
+                Err(error) => log(shared, &format!("备用线路切换失败：{error}")),
+            }
+            request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
             return Ok(());
         }
     }
     if !automatic && !force {
         return Ok(());
     }
-    if dynamic && failures >= 2 {
-        return do_rebuild_routes(shared);
-    }
     let last_switch = with_store(shared, |s| s.last_switch);
-    if !force && !HealthPolicy::should_failover(failures, last_switch, now_ms(), 2) {
+    if !force
+        && !HealthPolicy::should_failover(failures, last_switch, now_ms(), 1, FAILOVER_COOLDOWN_MS)
+    {
         return Ok(());
     }
     if dynamic {
+        with_store(shared, |store| store.last_switch = now_ms());
         return do_rebuild_routes(shared);
     }
 
@@ -2097,7 +2294,8 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
             .collect()
     });
     if alternatives.is_empty() {
-        log(shared, "没有备用节点");
+        log(shared, "没有备用节点，正在自动重建连接");
+        request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
         return Ok(());
     }
     let offset = with_store(shared, |s| s.scan_offset) % alternatives.len();
@@ -2126,7 +2324,10 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     let mut best: Option<(ProxyNode, ProbeResult)> = None;
     for node in candidates {
         if NodeRanking::is_hong_kong(&node)
-            && best.as_ref().map(|(current, _)| !NodeRanking::is_hong_kong(current)).unwrap_or(false)
+            && best
+                .as_ref()
+                .map(|(current, _)| !NodeRanking::is_hong_kong(current))
+                .unwrap_or(false)
         {
             break;
         }
@@ -2134,8 +2335,10 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
         if result.health == crate::logic::model::Health::Healthy
             && best
                 .as_ref()
-                .map(|(previous, b)| NodeRanking::is_hong_kong(&node) == NodeRanking::is_hong_kong(previous)
-                    && result.milliseconds < b.milliseconds)
+                .map(|(previous, b)| {
+                    NodeRanking::is_hong_kong(&node) == NodeRanking::is_hong_kong(previous)
+                        && result.milliseconds < b.milliseconds
+                })
                 .unwrap_or(true)
         {
             best = Some((node, result));
@@ -2148,18 +2351,30 @@ fn do_inspect(shared: &Shared, force: bool) -> Result<(), String> {
     }
     match best {
         Some((node, result)) => {
-            do_select(shared, &node)?;
+            if let Err(error) = do_failover_select(shared, &node) {
+                request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
+                return Err(error);
+            }
+            let verified = client_of(shared).internet_probe(proxy_port());
+            if verified.health != crate::logic::model::Health::Healthy {
+                request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
+                return Ok(());
+            }
+            with_store(shared, |store| {
+                store.internet_status = format!("HTTPS 出网已验证 · {} ms", verified.milliseconds);
+            });
             log(
                 shared,
                 &format!(
-                    "OpenAI 连通性恢复：{} ms；已有连接可能需要重试",
-                    result.milliseconds
+                    "连接恢复：{} · {} ms；旧连接已清理",
+                    node.name, result.milliseconds
                 ),
             );
             Ok(())
         }
         None => {
-            log(shared, "本批备用节点均未确认可用，保留当前节点，稍后重试");
+            log(shared, "本批备用节点均未确认可用，正在自动重建连接");
+            request_monitor_recovery(shared, MonitorRecovery::LinkUnavailable);
             Ok(())
         }
     }
@@ -2263,8 +2478,8 @@ fn do_openai_failover(shared: &Shared, force: bool) -> Result<(), String> {
         }
         match do_check(shared, &node, true) {
             Ok(result) if result.health == crate::logic::model::Health::Healthy => {
-                do_select(shared, &node)?;
-                commit(shared, |store| {
+                do_failover_select(shared, &node)?;
+                with_store(shared, |store| {
                     store.openai_status = format!(
                         "OpenAI 探测失败，已切换至 {} · {} ms",
                         node.name, result.milliseconds
@@ -2524,6 +2739,8 @@ pub fn shutdown(shared: &Shared) {
         store.epoch = store.epoch.wrapping_add(1);
         store.shutdown_running = true;
         store.shutdown_error = None;
+        // 永久退出后不允许再触发自动恢复重连。
+        store.pending_recovery = None;
         for flag in [
             &store.latency_cancel,
             &store.monitor_stop,

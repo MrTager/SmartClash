@@ -186,7 +186,7 @@ fn prepare(registry: &impl Registry, session: String, port: u16) -> Result<Trans
                 original: None,
                 applied: string("<local>"),
                 conflict: false,
-            current: None,
+                current: None,
             },
         );
     }
@@ -399,13 +399,23 @@ mod tests {
             .set("ProxyServer", &string("other-app:8899"))
             .unwrap();
         recover(&mut registry, &path, &mut tx).unwrap();
-        assert_eq!(registry.get("ProxyServer").unwrap(), string("other-app:8899"));
+        assert_eq!(
+            registry.get("ProxyServer").unwrap(),
+            string("other-app:8899")
+        );
         assert!(!path.exists());
-        let archive = std::fs::read_dir(path.parent().unwrap()).unwrap()
+        let archive = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("proxy-conflict-"))
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("proxy-conflict-")
+            })
             .unwrap();
-        let evidence: Transaction = serde_json::from_slice(&std::fs::read(archive).unwrap()).unwrap();
+        let evidence: Transaction =
+            serde_json::from_slice(&std::fs::read(archive).unwrap()).unwrap();
         let field = &evidence.fields["ProxyServer"];
         assert!(field.conflict);
         assert_eq!(field.original, None);
@@ -414,7 +424,10 @@ mod tests {
         let mut next = prepare(&registry, native::nonce().unwrap(), 17891).unwrap();
         apply(&mut registry, &path, &mut next).unwrap();
         recover(&mut registry, &path, &mut next).unwrap();
-        assert_eq!(registry.get("ProxyServer").unwrap(), string("other-app:8899"));
+        assert_eq!(
+            registry.get("ProxyServer").unwrap(),
+            string("other-app:8899")
+        );
         assert!(!path.exists());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

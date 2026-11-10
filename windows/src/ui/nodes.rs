@@ -4,15 +4,15 @@ use crate::logic::model::NodeSortOrder;
 use crate::state::Store;
 use egui::{RichText, Ui};
 
-pub fn draw(
-    view: &mut ViewState,
-    store: &mut Store,
-    ui: &mut Ui,
-    pending: &mut Vec<Action>,
-) {
+pub fn draw(view: &mut ViewState, store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new("节点与延迟").size(24.0).strong().color(widgets::TEXT));
+            ui.label(
+                RichText::new("节点与延迟")
+                    .size(24.0)
+                    .strong()
+                    .color(widgets::TEXT),
+            );
             hint(ui, "测试 HTTPS 出境延迟；结果只读，不改变当前业务出口。");
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -35,9 +35,12 @@ pub fn draw(
         .collect();
     match view.node_sort {
         NodeSortOrder::Original => {}
-        NodeSortOrder::Name => {
-            indexes.sort_by(|a, b| nodes[*a].name.to_lowercase().cmp(&nodes[*b].name.to_lowercase()))
-        }
+        NodeSortOrder::Name => indexes.sort_by(|a, b| {
+            nodes[*a]
+                .name
+                .to_lowercase()
+                .cmp(&nodes[*b].name.to_lowercase())
+        }),
         NodeSortOrder::Latency => indexes.sort_by(|a, b| {
             let left = store.latencies.get(&nodes[*a].id);
             let right = store.latencies.get(&nodes[*b].id);
@@ -155,44 +158,39 @@ pub fn draw(
                                 );
                             }
                         });
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let can_select = store.running
-                                    && !store.busy
-                                    && !store.is_testing_latency
-                                    && !store.stopping
-                                    && supported;
-                                if ui
-                                    .add_enabled(
-                                        can_select,
-                                        egui::Button::new(
-                                            RichText::new("选择").size(13.0).color(widgets::ACCENT),
-                                        )
-                                        .stroke(egui::Stroke::new(1.0, widgets::ACCENT)),
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let can_select = store.running
+                                && !store.busy
+                                && !store.is_testing_latency
+                                && !store.stopping
+                                && supported;
+                            if ui
+                                .add_enabled(
+                                    can_select,
+                                    egui::Button::new(
+                                        RichText::new("选择").size(13.0).color(widgets::ACCENT),
                                     )
-                                    .clicked()
-                                {
-                                    pending.push(Action::SelectVerified(node.clone()));
-                                }
-                                if ui
-                                    .add_enabled(
-                                        supported
-                                            && !store.busy
-                                            && !store.is_testing_latency
-                                            && !store.recovery,
-                                        egui::Button::new(
-                                            RichText::new("测速").size(13.0),
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    pending.push(Action::LatencyOne(node.clone()));
-                                }
-                                ui.add_space(4.0);
-                                latency_label(ui, store, &node.id);
-                            },
-                        );
+                                    .stroke(egui::Stroke::new(1.0, widgets::ACCENT)),
+                                )
+                                .clicked()
+                            {
+                                pending.push(Action::SelectVerified(node.clone()));
+                            }
+                            if ui
+                                .add_enabled(
+                                    supported
+                                        && !store.busy
+                                        && !store.is_testing_latency
+                                        && !store.recovery,
+                                    egui::Button::new(RichText::new("测速").size(13.0)),
+                                )
+                                .clicked()
+                            {
+                                pending.push(Action::LatencyOne(node.clone()));
+                            }
+                            ui.add_space(4.0);
+                            latency_label(ui, store, &node.id);
+                        });
                     });
                     if row + 1 < range_end {
                         ui.separator();

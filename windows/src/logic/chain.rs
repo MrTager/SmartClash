@@ -78,7 +78,11 @@ pub struct ChainTrace {
 }
 
 impl ChainTrace {
-    pub fn resolve(selected: &str, raw_nodes: &[ProxyNode], definitions: &[ProxyNode]) -> ChainTrace {
+    pub fn resolve(
+        selected: &str,
+        raw_nodes: &[ProxyNode],
+        definitions: &[ProxyNode],
+    ) -> ChainTrace {
         let mut index: HashMap<String, ProxyNode> = HashMap::new();
         for node in raw_nodes.iter().chain(definitions.iter()) {
             index.insert(node.name.clone(), node.clone());

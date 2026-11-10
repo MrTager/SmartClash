@@ -120,11 +120,16 @@ final class ProxyLogicTests: XCTestCase {
         XCTAssertEqual(HealthPolicy.classify(code: 0, body: "", elapsed: 8000).health, .offline)
         XCTAssertEqual(HealthPolicy.classify(code: 503, body: "", elapsed: 50).health, .offline)
     }
-    func testFailureThresholdAndCooldown() {
+    func testTenSecondMonitoringAndImmediateFailover() {
         let now = Date()
-        XCTAssertFalse(HealthPolicy.shouldFailover(failures: 1, lastSwitch: .distantPast, now: now))
-        XCTAssertFalse(HealthPolicy.shouldFailover(failures: 2, lastSwitch: now.addingTimeInterval(-29), now: now))
-        XCTAssertTrue(HealthPolicy.shouldFailover(failures: 2, lastSwitch: now.addingTimeInterval(-31), now: now))
+        XCTAssertEqual(HealthPolicy.monitorInterval, 10)
+        XCTAssertEqual(HealthPolicy.recoveryCooldown(failures: 0), 10)
+        XCTAssertEqual(HealthPolicy.recoveryCooldown(failures: 1), 20)
+        XCTAssertEqual(HealthPolicy.recoveryCooldown(failures: 3), 60)
+        XCTAssertTrue(HealthPolicy.shouldFailover(failures: 1, lastSwitch: .distantPast, now: now))
+        XCTAssertFalse(HealthPolicy.shouldFailover(failures: 1, lastSwitch: now.addingTimeInterval(-9), now: now))
+        XCTAssertTrue(HealthPolicy.shouldFailover(failures: 1, lastSwitch: now.addingTimeInterval(-11), now: now))
+        XCTAssertFalse(HealthPolicy.shouldFailover(failures: 0, lastSwitch: .distantPast, now: now))
     }
     func testEmptyRuntimeConfigurationRejected() {
         XCTAssertThrowsError(try Configuration.make(nodes: [], secret: "test", tun: false))

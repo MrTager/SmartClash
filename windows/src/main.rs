@@ -139,6 +139,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
+        state::actions::dispatch_monitor_recovery(&self.shared, ctx);
         let mut pending: Vec<ui::Action> = Vec::new();
         {
             let mut store = self.shared.lock().unwrap();

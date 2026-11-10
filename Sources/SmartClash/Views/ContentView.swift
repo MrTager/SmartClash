@@ -173,18 +173,12 @@ struct ContentView: View {
                         Toggle("OpenAI 或网络不可用时自动切换节点", isOn: $store.preferences.automatic)
                             .onChange(of: store.preferences.automatic) { _ in store.savePreferences() }
                         HStack {
-                            Text("检测间隔")
-                            Picker("检测间隔", selection: $store.preferences.interval) {
-                                Text("1 秒").tag(1); Text("5 秒").tag(5); Text("15 秒").tag(15)
-                                Text("1 分钟").tag(60); Text("5 分钟").tag(300)
-                            }.labelsHidden().frame(width: 160)
-                                .accessibilityLabel("智能切换检测间隔")
-                                .onChange(of: store.preferences.interval) { _ in store.savePreferences() }
+                            Label("业务链路每 10 秒检测一次", systemImage: "clock.arrow.2.circlepath")
                             Spacer()
                             Button("立即检测 / 故障切换") { store.perform { try await store.inspectCurrent(force: true) } }
                                 .disabled(!store.running || store.busy || store.stopping || store.recovery)
                         }
-                        Text("连续失败 2 次触发切换，切换冷却 30 秒。限流与不确定结果不触发切换。检测不重叠，实际周期包含请求耗时；推荐 1 分钟。")
+                        Text("明确断线后立即自动切节点并清理旧连接，切换冷却 10 秒；内核失联或备用节点全部失败时自动重建连接与系统代理，无需手动关开。限流与不确定结果不触发切换。")
                             .font(.caption).foregroundStyle(.secondary)
                         Text("未使用 API Key：检测仅确认 OpenAI API 的访问结果，不保证 ChatGPT 网页登录、验证码或账号可用性。切换影响新连接，已有请求可能需要重试。")
                             .font(.caption).foregroundStyle(.secondary)

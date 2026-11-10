@@ -4,12 +4,7 @@ use crate::logic::model::AGGREGATE_PORT;
 use crate::state::Store;
 use egui::{Color32, RichText, Ui};
 
-pub fn draw(
-    view: &mut ViewState,
-    store: &mut Store,
-    ui: &mut Ui,
-    pending: &mut Vec<Action>,
-) {
+pub fn draw(view: &mut ViewState, store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>) {
     widgets::page_title(
         ui,
         "多个订阅，一个入口",
@@ -54,11 +49,7 @@ pub fn draw(
             let can_change = store.can_change_sources();
             for source in sources {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("●")
-                            .size(10.0)
-                            .color(widgets::ACCENT),
-                    );
+                    ui.label(RichText::new("●").size(10.0).color(widgets::ACCENT));
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&source.name).strong().color(TEXT));
                         hint(
@@ -93,14 +84,19 @@ pub fn draw(
     ui.add_space(4.0);
 
     widgets::card(ui, Some("聚合输出"), |ui| {
-        ui.label(RichText::new("本机订阅链接（含随机访问令牌）").strong().color(TEXT));
+        ui.label(
+            RichText::new("本机订阅链接（含随机访问令牌）")
+                .strong()
+                .color(TEXT),
+        );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(if store.subscription_ready {
                     format!(
                         "http://127.0.0.1:{AGGREGATE_PORT}/{}…/config.yaml",
-                        &store.preferences.subscription_token[..6.min(store.preferences.subscription_token.len())]
+                        &store.preferences.subscription_token
+                            [..6.min(store.preferences.subscription_token.len())]
                     )
                 } else {
                     "订阅服务不可用".to_string()

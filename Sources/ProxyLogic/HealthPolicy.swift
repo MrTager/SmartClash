@@ -9,6 +9,18 @@ public struct ProbeResult {
     }
 }
 public enum HealthPolicy {
+    /// 业务链路固定每 10 秒检测一次；动态模式不再用 1 秒轮询主链路。
+    public static let monitorInterval: Int = 10
+    /// 明确断线后立即切换，但两次切换至少间隔 10 秒，避免节点抖动。
+    public static let failoverCooldown: TimeInterval = 10
+    public static func recoveryCooldown(failures: Int) -> TimeInterval {
+        switch max(0, failures) {
+        case 0: return 10
+        case 1: return 20
+        case 2: return 40
+        default: return 60
+        }
+    }
     public static func classify(code: Int, body: String, elapsed: Int) -> ProbeResult {
         let lower = body.lowercased()
         let health: Health
@@ -27,7 +39,10 @@ public enum HealthPolicy {
         else { health = .unknown }
         return ProbeResult(health: health, milliseconds: elapsed, detail: "HTTP \(code) · \(health.rawValue)")
     }
-    public static func shouldFailover(failures: Int, lastSwitch: Date, now: Date, threshold: Int = 2) -> Bool {
-        failures >= threshold && now.timeIntervalSince(lastSwitch) >= 30
+    public static func shouldFailover(
+        failures: Int, lastSwitch: Date, now: Date,
+        threshold: Int = 1, cooldown: TimeInterval = failoverCooldown
+    ) -> Bool {
+        failures >= threshold && now.timeIntervalSince(lastSwitch) >= cooldown
     }
 }

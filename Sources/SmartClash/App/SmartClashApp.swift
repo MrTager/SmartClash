@@ -5,6 +5,8 @@ import ProxyLogic
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
     private var terminationTask: Task<Void, Never>?
+    /// 仅安装脚本显式传入 --auto-connect 时自动恢复代理；正常启动不改变网络。
+    var autoConnectPending = CommandLine.arguments.contains("--auto-connect")
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
     }
@@ -45,7 +47,11 @@ struct SmartClashApp: App {
         // 在构造场景时绑定，不依赖首个窗口出现（菜单栏或早期退出也走清理）。
         let _ = bindDelegate()
         WindowGroup("SmartClash", id: "main") {
-            ContentView().environmentObject(store)
+            ContentView().environmentObject(store).onAppear {
+                guard delegate.autoConnectPending else { return }
+                delegate.autoConnectPending = false
+                store.perform { try await store.oneClickConnect() }
+            }
         }
         .commands {
             CommandGroup(replacing: .newItem) { }

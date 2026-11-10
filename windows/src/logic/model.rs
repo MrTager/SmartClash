@@ -88,7 +88,11 @@ pub enum RoutingMode {
 }
 
 impl RoutingMode {
-    pub const ALL: [RoutingMode; 3] = [RoutingMode::LowLatency, RoutingMode::HighSpeed, RoutingMode::Ai];
+    pub const ALL: [RoutingMode; 3] = [
+        RoutingMode::LowLatency,
+        RoutingMode::HighSpeed,
+        RoutingMode::Ai,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -140,7 +144,9 @@ impl TrafficMode {
         match self {
             TrafficMode::Rule => "按内置规则分流：本机与局域网地址直连，其余流量走当前代理线路。",
             TrafficMode::Global => "进入内核的业务流量全部走当前代理线路，跳过分流与局域网例外。",
-            TrafficMode::Direct => "进入内核的业务流量全部直连，不使用代理节点；系统代理和 TUN 可继续开启。",
+            TrafficMode::Direct => {
+                "进入内核的业务流量全部直连，不使用代理节点；系统代理和 TUN 可继续开启。"
+            }
         }
     }
 
@@ -186,7 +192,7 @@ pub struct Preferences {
 }
 
 fn default_interval() -> u64 {
-    60
+    10
 }
 
 fn default_true() -> bool {
@@ -209,7 +215,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             sources: Vec::new(),
-            interval: 60,
+            interval: 10,
             automatic: true,
             explore_multihop: Some(false),
             routing_mode: Some(RoutingMode::LowLatency),
@@ -334,7 +340,11 @@ pub struct ProbeResult {
 
 impl ProbeResult {
     pub fn new(health: Health, milliseconds: i64, detail: String) -> Self {
-        Self { health, milliseconds, detail }
+        Self {
+            health,
+            milliseconds,
+            detail,
+        }
     }
 }
 
@@ -352,7 +362,11 @@ pub enum NodeSortOrder {
 }
 
 impl NodeSortOrder {
-    pub const ALL: [NodeSortOrder; 3] = [NodeSortOrder::Latency, NodeSortOrder::Name, NodeSortOrder::Original];
+    pub const ALL: [NodeSortOrder; 3] = [
+        NodeSortOrder::Latency,
+        NodeSortOrder::Name,
+        NodeSortOrder::Original,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -459,7 +473,11 @@ impl CoreConnection {
         if self.chains.iter().any(|c| c == "DIRECT") {
             return "直连".into();
         }
-        if self.chains.iter().any(|c| c == "REJECT" || c == "REJECT-DROP") {
+        if self
+            .chains
+            .iter()
+            .any(|c| c == "REJECT" || c == "REJECT-DROP")
+        {
             return "已拦截".into();
         }
         self.chains
@@ -472,7 +490,10 @@ impl CoreConnection {
     }
 
     /// 连接自身的链路在出口切换后仍保留旧路由；永远不要用当前选中节点推断。
-    pub fn route_nodes<'a>(&self, index: &std::collections::HashMap<String, &'a ProxyNode>) -> Vec<&'a ProxyNode> {
+    pub fn route_nodes<'a>(
+        &self,
+        index: &std::collections::HashMap<String, &'a ProxyNode>,
+    ) -> Vec<&'a ProxyNode> {
         if self
             .chains
             .iter()
@@ -563,8 +584,7 @@ mod tests {
         assert_eq!(idle.download_total, 1);
         assert_eq!(idle.upload_total, 2);
 
-        let minimal: ConnectionSnapshot =
-            serde_json::from_str("{}").expect("缺失字段应使用默认值");
+        let minimal: ConnectionSnapshot = serde_json::from_str("{}").expect("缺失字段应使用默认值");
         assert!(minimal.connections.is_empty());
     }
 }

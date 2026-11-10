@@ -10,7 +10,9 @@ use serde_json::{json, Map, Value};
 type Fields = Map<String, Value>;
 
 fn s<'a>(p: &'a Fields, key: &str) -> Option<&'a str> {
-    p.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+    p.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
 }
 
 fn num(p: &Fields, key: &str) -> Option<u64> {
@@ -64,7 +66,11 @@ fn first_host(p: &Fields, opts: Option<&Fields>) -> Option<String> {
         if let Some(host) = value.as_str() {
             return Some(host.to_string());
         }
-        if let Some(host) = value.as_array().and_then(|v| v.first()).and_then(|v| v.as_str()) {
+        if let Some(host) = value
+            .as_array()
+            .and_then(|v| v.first())
+            .and_then(|v| v.as_str())
+        {
             return Some(host.to_string());
         }
     }
@@ -132,9 +138,7 @@ pub fn support_error(kind: KernelKind, p: &Fields) -> Option<String> {
                 }
             }
             "vmess" | "vless" | "trojan" | "socks5" | "http" => None,
-            "hysteria" | "hysteria2" | "tuic" | "anytls" => {
-                Some(format!("Xray 不支持 {ty} 协议"))
-            }
+            "hysteria" | "hysteria2" | "tuic" | "anytls" => Some(format!("Xray 不支持 {ty} 协议")),
             "ssr" => Some("Xray 不支持 ShadowsocksR".into()),
             "snell" => Some("Xray 不支持 Snell".into()),
             other => Some(format!("Xray 不支持协议 {other}")),
@@ -199,7 +203,10 @@ fn singbox_transport(p: &Fields) -> Result<Option<Value>, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("/");
             ws.insert("path".into(), json!(path));
-            if let Some(headers) = opts.and_then(|o| o.get("headers")).and_then(|v| v.as_object()) {
+            if let Some(headers) = opts
+                .and_then(|o| o.get("headers"))
+                .and_then(|v| v.as_object())
+            {
                 let mut map = Map::new();
                 for (key, value) in headers {
                     if let Some(text) = value.as_str() {
@@ -228,10 +235,7 @@ fn singbox_transport(p: &Fields) -> Result<Option<Value>, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("/");
             http.insert("path".into(), json!(path));
-            if let Some(host) = opts
-                .and_then(|o| o.get("host"))
-                .and_then(|v| v.as_array())
-            {
+            if let Some(host) = opts.and_then(|o| o.get("host")).and_then(|v| v.as_array()) {
                 if !host.is_empty() {
                     http.insert("host".into(), Value::Array(host.clone()));
                 }
@@ -279,7 +283,10 @@ pub fn to_singbox(node: &ProxyNode) -> Result<Value, String> {
     match ty {
         "ss" => {
             out.insert("type".into(), json!("shadowsocks"));
-            out.insert("method".into(), json!(s(p, "cipher").unwrap_or("aes-128-gcm")));
+            out.insert(
+                "method".into(),
+                json!(s(p, "cipher").unwrap_or("aes-128-gcm")),
+            );
             out.insert("password".into(), json!(s(p, "password").unwrap_or("")));
             if flag(p, "udp-over-tcp").unwrap_or(false) {
                 out.insert("udp_over_tcp".into(), json!(true));
@@ -348,10 +355,13 @@ pub fn to_singbox(node: &ProxyNode) -> Result<Value, String> {
                 out.insert("down_mbps".into(), json!(value));
             }
             if let Some(obfs) = s(p, "obfs") {
-                out.insert("obfs".into(), json!({
-                    "type": obfs,
-                    "password": s(p, "obfs-password").unwrap_or("")
-                }));
+                out.insert(
+                    "obfs".into(),
+                    json!({
+                        "type": obfs,
+                        "password": s(p, "obfs-password").unwrap_or("")
+                    }),
+                );
             }
             if let Some(tls) = singbox_tls(p, true) {
                 out.insert("tls".into(), tls);
@@ -512,10 +522,7 @@ fn xray_stream(p: &Fields, force_tls: bool) -> Result<Value, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("/");
             h2.insert("path".into(), json!(path));
-            if let Some(list) = opts
-                .and_then(|o| o.get("host"))
-                .and_then(|v| v.as_array())
-            {
+            if let Some(list) = opts.and_then(|o| o.get("host")).and_then(|v| v.as_array()) {
                 h2.insert("host".into(), Value::Array(list.clone()));
             } else if let Some(host) = first_host(p, opts) {
                 h2.insert("host".into(), json!([host]));
@@ -538,10 +545,7 @@ fn xray_stream(p: &Fields, force_tls: bool) -> Result<Value, String> {
         _ => {}
     }
     if let Some(dialer) = s(p, "dialer-proxy") {
-        stream.insert(
-            "sockopt".into(),
-            json!({ "dialerProxy": xray_tag(dialer) }),
-        );
+        stream.insert("sockopt".into(), json!({ "dialerProxy": xray_tag(dialer) }));
     }
     Ok(Value::Object(stream))
 }
@@ -628,7 +632,10 @@ pub fn to_xray(node: &ProxyNode) -> Result<Value, String> {
                     json!([{ "user": user, "pass": s(p, "password").unwrap_or("") }]),
                 );
             }
-            out.insert("settings".into(), json!({ "servers": [Value::Object(server_obj)] }));
+            out.insert(
+                "settings".into(),
+                json!({ "servers": [Value::Object(server_obj)] }),
+            );
         }
         "http" => {
             out.insert("protocol".into(), json!("http"));
@@ -641,7 +648,10 @@ pub fn to_xray(node: &ProxyNode) -> Result<Value, String> {
                     json!([{ "user": user, "pass": s(p, "password").unwrap_or("") }]),
                 );
             }
-            out.insert("settings".into(), json!({ "servers": [Value::Object(server_obj)] }));
+            out.insert(
+                "settings".into(),
+                json!({ "servers": [Value::Object(server_obj)] }),
+            );
         }
         other => return Err(format!("Xray 不支持协议 {other}")),
     }
@@ -718,8 +728,18 @@ mod tests {
     fn all_declared_protocols_are_deterministic() {
         // 防止协议分支被意外删掉：每个协议至少在 Mihomo 之外给出明确支持/不支持结论。
         let protocols = [
-            "ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "socks5",
-            "http", "snell", "anytls",
+            "ss",
+            "ssr",
+            "vmess",
+            "vless",
+            "trojan",
+            "hysteria",
+            "hysteria2",
+            "tuic",
+            "socks5",
+            "http",
+            "snell",
+            "anytls",
         ];
         let seen: BTreeSet<&str> = protocols.into_iter().collect();
         for protocol in seen {

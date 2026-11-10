@@ -4,6 +4,14 @@ import AppKit
 import ProxyLogic
 @MainActor
 final class AppStore: ObservableObject {
+    private struct AutoRecoverySnapshot {
+        let systemProxy: Bool
+        let tun: Bool
+        let dynamic: Bool
+        let plan: RoutePlan?
+        let selected: String
+        let revalidate: Bool
+    }
     @Published var preferences = Preferences()
     @Published var nodes: [ProxyNode] = []
     private var statuses: [String: NodeStatus] = [:]
@@ -68,6 +76,10 @@ final class AppStore: ObservableObject {
     private var lastSwitch = Date.distantPast
     private var scanOffset = 0
     private var lastUpdate = Date()
+    private var lastAutoRecovery = Date.distantPast
+    private var autoRecoveryFailures = 0
+    private var autoRecoveryInFlight = false
+    private var autoRecoverySnapshot: AutoRecoverySnapshot?
     private let settings = Files.root.appendingPathComponent("preferences.json")
     private var outboundInterface: String?
     @Published var dynamicMode = false
@@ -135,7 +147,8 @@ final class AppStore: ObservableObject {
         if FileManager.default.fileExists(atPath: settings.path) {
             preferences = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: settings))
         }
-        preferences.interval = max(1, min(3600, preferences.interval))
+        // 断线恢复固定为 10 秒检测；旧偏好里的 60 秒不再沿用。
+        preferences.interval = HealthPolicy.monitorInterval
         // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
         if let saved = preferences.proxyPort, Configuration.validateProxyPort(saved) != nil {
             preferences.proxyPort = Configuration.defaultProxyPort
@@ -237,6 +250,7 @@ final class AppStore: ObservableObject {
         guard !persistsChanges || lifecycleReady else { return }
         operationTask?.cancel(); latencyTask?.cancel()
         monitor?.cancel(); standbyMonitor?.cancel()
+        autoRecoverySnapshot = nil; autoRecoveryFailures = 0; lastAutoRecovery = .distantPast
         guard !stopping else { return }
         stopping = true
         monitoringRequested = false
@@ -716,7 +730,7 @@ final class AppStore: ObservableObject {
         standbyMonitor = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if trafficMode != .direct && dynamicMode && running && !busy && !isTestingLatency && routingStatus == "已打通" {
+                if trafficMode != .direct && dynamicMode && running && !busy && !isTestingLatency && !autoRecoveryInFlight && routingStatus == "已打通" {
                     do {
                         var pending = routeNodes.filter { $0.name != self.selected }.sorted {
                             (self.statuses[$0.id]?.checked ?? .distantPast) < (self.statuses[$1.id]?.checked ?? .distantPast)
@@ -736,7 +750,7 @@ final class AppStore: ObservableObject {
             }
         }
     }
-    func select(_ node: ProxyNode) async throws {
+    func select(_ node: ProxyNode, closeExistingConnections: Bool = false) async throws {
         try checkLifecycle()
         guard running else { throw ProxyError.message("请先启动内核") }
         if kernel.capabilities.liveSwitch {
@@ -759,6 +773,8 @@ final class AppStore: ObservableObject {
             // Xray 没有节点选择接口，只能带着新出口重启内核。
             try await restartCore(preferredName: node.name)
         }
+        // 已有 TCP/WebSocket 会继续绑定失效出口；故障切换必须让客户端重建连接。
+        if closeExistingConnections && kernel != .xray { try? await api.closeConnections() }
         selected = node.name; lastSwitch = Date(); failures = 0; log("切换至 \(node.name)")
         publishRoute()
     }
@@ -825,21 +841,35 @@ final class AppStore: ObservableObject {
         try checkLifecycle()
         guard running else { return }
         // A heartbeat distinguishes a dead core from an unhealthy exit node.
-        let heartbeat = try? await api.request("/version")
+        let heartbeat: [String: Any]?
+        do { heartbeat = try await api.request("/version") }
+        catch is CancellationError { throw CancellationError() }
+        catch { heartbeat = nil }
         try Task.checkCancellation()
         guard heartbeat != nil else {
-            log("内核失联，正在恢复系统网络")
-            try await stop(); return
+            log("内核失联，正在自动恢复连接，无需手动关开代理")
+            autoRecoverConnection(reason: "内核失联", revalidate: false)
+            return
         }
-        if trafficMode == .direct { return }
+        // 直接检测业务监听端口：PROBE 组只用于候选节点，不能代表真实 SMART 链路。
+        let directOrBusiness = try await api.internetProbe(port: Configuration.proxyPort)
+        if trafficMode == .direct {
+            if directOrBusiness.health == .offline {
+                internetStatus = "直连出网失败，正在自动恢复"
+                autoRecoverConnection(reason: "直连链路断线", revalidate: false)
+            } else {
+                internetStatus = "直连出网正常 · \(directOrBusiness.milliseconds) ms"
+            }
+            return
+        }
         guard let current = routeNodes.first(where: { $0.name == selected }) else { return }
         if dynamicMode && routingStatus != "已打通" { try await rebuildRoutes(); return }
-        let internet = try await withProbe(current) { _ in try await api.internetProbe(port: Configuration.probePort) }
+        let internet = directOrBusiness
         let networkText = internet.health == .healthy ? "HTTPS 出网正常" : "当前线路出网失败，正在检查备用"
         if internetStatus != networkText { internetStatus = networkText }
         let health: ProbeResult
         if internet.health == .healthy && (activeMode == .ai || Date().timeIntervalSince(lastOpenAIProbe) >= 30) {
-            let ai = try await withProbe(current) { _ in try await api.probe(port: Configuration.probePort) }
+            let ai = try await api.probe(port: Configuration.proxyPort)
             lastOpenAIProbe = Date()
             health = activeMode == .ai ? ai : internet
             let text = "OpenAI：\(ai.detail)"; if openAIStatus != text { openAIStatus = text }
@@ -848,7 +878,7 @@ final class AppStore: ObservableObject {
         try Task.checkCancellation()
         statuses[current.id] = NodeStatus(result: health, checked: Date())
         if health.health == .healthy {
-            failures = 0
+            failures = 0; autoRecoveryFailures = 0
             if dynamicMode && routingStatus != "已打通" {
                 routingStatus = "已打通"
                 if !systemProxy && !tun { try await proxy.enable(); systemProxy = true }
@@ -860,18 +890,26 @@ final class AppStore: ObservableObject {
         }
         failures += 1
         if dynamicMode, let backup = freshStandbys.first {
-            try await select(backup)
-            routingStatus = "已打通"
-            log("主线路失效，已切换到预热备用线路；已有请求可能需要重试")
+            try await select(backup, closeExistingConnections: true)
+            let verified = try await api.internetProbe(port: Configuration.proxyPort)
+            guard verified.health == .healthy else {
+                autoRecoverConnection(reason: "备用线路切换后仍不通", revalidate: true)
+                return
+            }
+            routingStatus = "已打通"; internetStatus = "HTTPS 出网已验证 · \(verified.milliseconds) ms"
+            log("主线路失效，已切换到预热备用线路；旧连接已清理")
             return
         }
         guard preferences.automatic || force else { return }
-        if dynamicMode && failures >= 2 { try await rebuildRoutes(); return }
         guard force || HealthPolicy.shouldFailover(failures: failures, lastSwitch: lastSwitch, now: Date()) else { return }
-        if dynamicMode { try await rebuildRoutes(); return }
+        if dynamicMode { lastSwitch = Date(); try await rebuildRoutes(); return }
         // Probe a bounded rotating batch, skipping recently failed exits.
         let alternatives = routeNodes.filter { $0.id != current.id }
-        guard !alternatives.isEmpty else { log("没有备用节点"); return }
+        guard !alternatives.isEmpty else {
+            log("没有备用节点，正在自动重建连接")
+            autoRecoverConnection(reason: "没有备用节点", revalidate: true)
+            return
+        }
         let offset = scanOffset % alternatives.count
         let rotated = Array(alternatives[offset...] + alternatives[..<offset])
         scanOffset = (offset + 12) % alternatives.count
@@ -888,9 +926,98 @@ final class AppStore: ObservableObject {
             // Stop early when an acceptable healthy exit is found.
             if let best, best.1.milliseconds < 1500 { break }
         }
-        guard let best else { log("本批备用节点均未确认可用，保留当前节点，稍后重试"); return }
-        try await select(best.0)
-        log("OpenAI 连通性恢复：\(best.1.milliseconds) ms；已有连接可能需要重试")
+        guard let best else {
+            log("本批备用节点均未确认可用，正在自动重建连接")
+            autoRecoverConnection(reason: "备用节点均未确认可用", revalidate: true)
+            return
+        }
+        try await select(best.0, closeExistingConnections: true)
+        let verified = try await api.internetProbe(port: Configuration.proxyPort)
+        guard verified.health == .healthy else {
+            autoRecoverConnection(reason: "切换后业务端口仍不通", revalidate: true)
+            return
+        }
+        internetStatus = "HTTPS 出网已验证 · \(verified.milliseconds) ms"
+        log("连接恢复：\(best.0.name) · \(verified.milliseconds) ms；旧连接已清理")
+    }
+    /// 自动完成用户过去手动执行的「关闭代理 → 恢复网络 → 重新开启」全流程。
+    /// 必须在独立的未取消任务中运行：监控任务会被它自己的 stop() 取消，
+    /// 若在原任务中执行，CoreProcess.start() 会立刻收到 CancellationError。
+    private func autoRecoverConnection(reason: String, revalidate: Bool) {
+        guard monitoringRequested && !stopping && !autoRecoveryInFlight else { return }
+        guard running || recovery || proxy.hasBackup || engine.recoveryNeeded || autoRecoverySnapshot != nil else { return }
+        let cooldown = HealthPolicy.recoveryCooldown(failures: autoRecoveryFailures)
+        let now = Date()
+        guard now.timeIntervalSince(lastAutoRecovery) >= cooldown else {
+            logBackground("\(reason)：等待自动恢复冷却（\(Int(cooldown)) 秒）")
+            return
+        }
+        if autoRecoverySnapshot == nil {
+            autoRecoverySnapshot = AutoRecoverySnapshot(
+                systemProxy: systemProxy || proxy.hasBackup,
+                tun: tun,
+                dynamic: dynamicMode,
+                plan: routePlan,
+                selected: selected,
+                revalidate: revalidate)
+        }
+        lastAutoRecovery = now
+        autoRecoveryInFlight = true
+        log("\(reason)，正在自动恢复网络并重新连接（无需手动关开代理）")
+        Task.detached(priority: .userInitiated) { @MainActor [self] in
+            defer {
+                autoRecoveryInFlight = false
+                if !stopping {
+                    monitoringRequested = true
+                    if running { startMonitor() }
+                }
+            }
+            guard !stopping, let snapshot = autoRecoverySnapshot else { return }
+            let wasSystemProxy = snapshot.systemProxy || systemProxy || proxy.hasBackup
+            let wasTun = snapshot.tun || tun
+            let wasDynamic = snapshot.dynamic || dynamicMode
+            let plan = snapshot.plan ?? routePlan
+            let previous = snapshot.selected.isEmpty ? selected : snapshot.selected
+            let shouldRevalidate = snapshot.revalidate || revalidate
+            do {
+                try await stop()
+                try Task.checkCancellation()
+                guard !stopping else { return }
+                dynamicMode = wasDynamic; routePlan = plan
+                try await start(tun: wasTun, preferredName: previous)
+                // start() 会启动新监控；恢复链路期间先暂停它，避免与选路争用 PROBE 组。
+                await pauseMonitoring()
+                try Task.checkCancellation()
+                guard !stopping else { return }
+                if wasTun {
+                    let result = try await verifyTunEgress()
+                    internetStatus = "TUN 出网已验证 · \(result.milliseconds) ms"
+                } else if shouldRevalidate && trafficMode != .direct {
+                    try await ensureReachableRoute(preferCurrent: false)
+                    internetStatus = "HTTPS 出网已验证"
+                } else if trafficMode == .direct {
+                    let result = try await api.internetProbe(port: Configuration.proxyPort)
+                    guard result.health == .healthy else { throw ProxyError.message("直连出网未通过验证") }
+                    internetStatus = "直连出网已验证 · \(result.milliseconds) ms"
+                }
+                if wasSystemProxy && !systemProxy && !stopping {
+                    try await proxy.enable(); systemProxy = true
+                }
+                routingStatus = trafficMode == .direct ? "直连模式" : "已打通"
+                failures = 0; autoRecoveryFailures = 0; autoRecoverySnapshot = nil; lastSwitch = Date()
+                log("自动恢复完成，系统代理已重新开启")
+            } catch {
+                autoRecoveryFailures = min(3, autoRecoveryFailures + 1)
+                recovery = proxy.hasBackup || engine.recoveryNeeded
+                let delay = HealthPolicy.recoveryCooldown(failures: autoRecoveryFailures)
+                log("自动恢复未完成：\(error.localizedDescription)；\(Int(delay)) 秒后自动重试")
+                Task.detached { @MainActor [self] in
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    guard !stopping && monitoringRequested && autoRecoverySnapshot != nil else { return }
+                    autoRecoverConnection(reason: "自动恢复重试", revalidate: shouldRevalidate)
+                }
+            }
+        }
     }
     private func startMonitor() {
         guard !terminating else { return }
@@ -902,7 +1029,7 @@ final class AppStore: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 guard generation == monitorGeneration else { return }
-                if !busy && !isTestingLatency && !routeMutationInFlight && running {
+                if !busy && !isTestingLatency && !routeMutationInFlight && !autoRecoveryInFlight && running {
                     healthCheckInFlight = true
                     do {
                         try await inspectCurrent()
@@ -911,7 +1038,7 @@ final class AppStore: ObservableObject {
                     catch { logBackground("检测失败：\(error.localizedDescription)") }
                     healthCheckInFlight = false
                 }
-                do { try await Task.sleep(nanoseconds: UInt64(dynamicMode ? 1 : max(1, preferences.interval)) * 1_000_000_000) }
+                do { try await Task.sleep(nanoseconds: UInt64(HealthPolicy.monitorInterval) * 1_000_000_000) }
                 catch { return }
             }
         }
@@ -935,6 +1062,8 @@ final class AppStore: ObservableObject {
         startupTask?.cancel(); operationTask?.cancel(); latencyTask?.cancel()
         monitor?.cancel(); standbyMonitor?.cancel()
         rulesScheduleTask?.cancel(); rulesRefreshTask?.cancel()
+        // 永久退出后不允许再触发自动恢复重连。
+        autoRecoverySnapshot = nil; autoRecoveryFailures = 0; lastAutoRecovery = .distantPast
         let startup = startupTask, operation = operationTask, latency = latencyTask, stoppingTask = stopTask
         let schedule = rulesScheduleTask, refresh = rulesRefreshTask
         stopping = true; busy = true; monitoringRequested = false

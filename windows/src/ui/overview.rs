@@ -189,23 +189,7 @@ fn automatic_controls(store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>)
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("检测间隔");
-            egui::ComboBox::from_id_salt("interval")
-                .selected_text(interval_text(store.preferences.interval))
-                .show_ui(ui, |ui| {
-                    for value in [1u64, 5, 15, 60, 300] {
-                        if ui
-                            .selectable_label(
-                                store.preferences.interval == value,
-                                interval_text(value),
-                            )
-                            .clicked()
-                        {
-                            store.preferences.interval = value;
-                            store.save_preferences();
-                        }
-                    }
-                });
+            ui.label("业务链路每 10 秒检测一次");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
@@ -221,7 +205,7 @@ fn automatic_controls(store: &mut Store, ui: &mut Ui, pending: &mut Vec<Action>)
         ui.add_space(4.0);
         hint(
             ui,
-            "连续失败 2 次触发切换，切换冷却 30 秒。限流与不确定结果不触发切换。检测不重叠，实际周期包含请求耗时；推荐 1 分钟。",
+            "明确断线后立即自动切节点并清理旧连接，切换冷却 10 秒；内核失联或备用节点全部失败时自动重建连接与系统代理，无需手动关开。限流与不确定结果不触发切换。",
         );
         hint(
             ui,
@@ -265,15 +249,4 @@ fn port_controls(view: &mut ViewState, store: &mut Store, ui: &mut Ui, pending: 
             hint(ui, "范围 1024–65535；运行中修改会自动重启内核生效。");
         });
     });
-}
-
-fn interval_text(value: u64) -> String {
-    match value {
-        1 => "1 秒".into(),
-        5 => "5 秒".into(),
-        15 => "15 秒".into(),
-        60 => "1 分钟".into(),
-        300 => "5 分钟".into(),
-        other => format!("{other} 秒"),
-    }
 }

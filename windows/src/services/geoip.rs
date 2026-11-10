@@ -88,7 +88,10 @@ pub fn is_public_ip(text: &str) -> bool {
         }
         IpAddr::V6(v6) => {
             let head = v6.segments()[0];
-            !(v6.is_loopback() || v6.is_unspecified() || (head & 0xffc0) == 0xfe80 || (head & 0xfe00) == 0xfc00)
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (head & 0xffc0) == 0xfe80
+                || (head & 0xfe00) == 0xfc00)
         }
     }
 }

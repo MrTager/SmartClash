@@ -2,7 +2,7 @@ import Foundation
 import ProxyLogic
 struct Preferences: Codable {
     var sources: [Source] = []
-    var interval: Int = 60
+    var interval: Int = HealthPolicy.monitorInterval
     var automatic: Bool = true
     var exploreMultihop: Bool? = false
     var routingMode: RoutingMode? = .lowLatency

@@ -162,11 +162,7 @@ pub fn draw(
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 7.0;
                             ui.label(egui::RichText::new("●").size(9.0).color(color));
-                            ui.label(
-                                egui::RichText::new(text)
-                                    .size(12.0)
-                                    .color(color),
-                            );
+                            ui.label(egui::RichText::new(text).size(12.0).color(color));
                         });
                     });
             });
@@ -197,10 +193,8 @@ pub fn draw(
                     });
                 });
                 ui.add_space(6.0);
-                let line = ui.allocate_response(
-                    egui::vec2(ui.available_width(), 1.0),
-                    egui::Sense::hover(),
-                );
+                let line = ui
+                    .allocate_response(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
                 ui.painter()
                     .rect_filled(line.rect, egui::Rounding::same(0.0), widgets::BORDER);
             });
@@ -242,9 +236,7 @@ pub fn draw(
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(
-                        egui::RichText::new("●").size(10.0).color(widgets::WARN),
-                    );
+                    ui.label(egui::RichText::new("●").size(10.0).color(widgets::WARN));
                     ui.label(egui::RichText::new(error).size(14.0));
                 });
                 ui.add_space(10.0);

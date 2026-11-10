@@ -6,8 +6,18 @@ const MAX_BYTES: usize = 10_000_000;
 const MAX_NODES: usize = 5000;
 
 const SUPPORTED: [&str; 12] = [
-    "ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2", "tuic", "socks5", "http",
-    "snell", "anytls",
+    "ss",
+    "ssr",
+    "vmess",
+    "vless",
+    "trojan",
+    "hysteria",
+    "hysteria2",
+    "tuic",
+    "socks5",
+    "http",
+    "snell",
+    "anytls",
 ];
 
 pub struct ParseOutcome {
@@ -26,10 +36,9 @@ pub fn parse_detailed(text: &str, source: &Source) -> Result<ParseOutcome, Strin
     if text.len() > MAX_BYTES {
         return Err("订阅超过 10 MB".into());
     }
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(text).map_err(|_| "订阅 YAML 语法无效，已隐藏可能包含凭据的解析详情")?;
-    let json: Value =
-        serde_json::to_value(&yaml).map_err(|_| "订阅格式无法转换为节点列表")?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(text)
+        .map_err(|_| "订阅 YAML 语法无效，已隐藏可能包含凭据的解析详情")?;
+    let json: Value = serde_json::to_value(&yaml).map_err(|_| "订阅格式无法转换为节点列表")?;
     let doc = json
         .as_object()
         .ok_or("需要含 proxies 的 Clash YAML/JSON 订阅（最多 5000 个节点）；不支持 Base64 URI 列表或仅有 provider 的配置")?;
@@ -166,7 +175,12 @@ fn normalize_transport(input: &Map<String, Value>) -> Result<Map<String, Value>,
         options.entry("path").or_insert(path);
     }
     if let Some(headers) = raw.remove("ws-headers") {
-        if !headers.is_object() || headers.as_object().map(|h| h.values().any(|v| !v.is_string())).unwrap_or(true) {
+        if !headers.is_object()
+            || headers
+                .as_object()
+                .map(|h| h.values().any(|v| !v.is_string()))
+                .unwrap_or(true)
+        {
             return Err("WebSocket 请求头格式无效".into());
         }
         options.entry("headers").or_insert(headers);

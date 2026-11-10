@@ -20,11 +20,7 @@ pub fn draw(store: &Store, ui: &mut Ui) {
                     for line in &store.logs {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.label(
-                                RichText::new("●")
-                                    .size(7.0)
-                                    .color(widgets::MUTED),
-                            );
+                            ui.label(RichText::new("●").size(7.0).color(widgets::MUTED));
                             ui.label(
                                 RichText::new(line)
                                     .monospace()
@@ -45,5 +41,8 @@ pub fn draw(store: &Store, ui: &mut Ui) {
         crate::services::paths::open_in_explorer(&root);
     }
     ui.add_space(2.0);
-    hint(ui, "诊断目录包含配置、订阅缓存与内核日志，可能含节点凭据，请按敏感文件处理。");
+    hint(
+        ui,
+        "诊断目录包含配置、订阅缓存与内核日志，可能含节点凭据，请按敏感文件处理。",
+    );
 }

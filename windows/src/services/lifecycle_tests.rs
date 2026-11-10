@@ -81,10 +81,18 @@ fn fixture_entry() {
             std::fs::create_dir_all(&dir).unwrap();
             let mut owner = native::current_identity().unwrap();
             owner.exe = root.join("old-portable").join("SmartClash.exe");
-            let mut session = Session { version: 1, nonce, owner, phase: "clean".into() };
+            let mut session = Session {
+                version: 1,
+                nonce,
+                owner,
+                phase: "clean".into(),
+            };
             encode(&dir.join("session.json"), &session).unwrap();
             reconcile().unwrap();
-            assert!(validate_session(&session.nonce).err().unwrap().contains("固定程序路径"));
+            assert!(validate_session(&session.nonce)
+                .err()
+                .unwrap()
+                .contains("固定程序路径"));
             session.phase = "recovering".into();
             encode(&dir.join("session.json"), &session).unwrap();
             assert!(reconcile().unwrap_err().contains("进程身份不符"));
@@ -311,12 +319,20 @@ fn clean_history_allows_portable_move_but_unresolved_checks_recorded_identity() 
     let root = std::env::temp_dir().join(format!("sc-hist-{}", &scope[..12]));
     std::fs::create_dir(&root).unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "services::lifecycle::tests::fixture_entry", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "services::lifecycle::tests::fixture_entry",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("SMARTCLASH_FIXTURE_ROOT", &root)
         .env("SMARTCLASH_FIXTURE_SCOPE", &scope)
         .env("SMARTCLASH_FIXTURE_INTERNAL", "[\"--fixture-history\"]")
-        .stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-        .status().unwrap();
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .unwrap();
     assert!(status.success());
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -400,7 +416,8 @@ fn shutdown_timeout_never_enters_held_lifecycle_lock() {
             let _guard = lock.lock().unwrap();
             Ok(())
         },
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert_eq!(error, "模拟后台任务等待超时");
     assert!(!entered.load(Ordering::SeqCst));
 }
@@ -426,17 +443,37 @@ fn elevated_config_rejects_external_execution_and_files() {
         "ws-opts":{"path":"/ws"}
     }]);
     validate_tun_config(KernelKind::Mihomo, &serde_json::to_vec(&baseline).unwrap()).unwrap();
-    for key in ["command", "script", "plugin", "output", "certificate_path", "path"] {
+    for key in [
+        "command",
+        "script",
+        "plugin",
+        "output",
+        "certificate_path",
+        "path",
+    ] {
         let mut unsafe_value = baseline.clone();
         unsafe_value["proxies"][0]["ws-opts"]["nested"] = serde_json::json!({key:"C:/untrusted"});
-        let error = validate_tun_config(KernelKind::Mihomo, &serde_json::to_vec(&unsafe_value).unwrap()).unwrap_err();
-        assert_eq!(error, format!("TUN 配置包含外部路径或执行资源：/proxies/0/ws-opts/nested/{key}"));
+        let error = validate_tun_config(
+            KernelKind::Mihomo,
+            &serde_json::to_vec(&unsafe_value).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!("TUN 配置包含外部路径或执行资源：/proxies/0/ws-opts/nested/{key}")
+        );
     }
     for path in ["//external/share", "C:/other", "/ws\\escape"] {
         let mut unsafe_value = baseline.clone();
         unsafe_value["proxies"][0]["ws-opts"]["path"] = serde_json::json!(path);
-        assert_eq!(validate_tun_config(KernelKind::Mihomo, &serde_json::to_vec(&unsafe_value).unwrap()).unwrap_err(),
-            "TUN 配置包含外部路径或执行资源：/proxies/0/ws-opts/path");
+        assert_eq!(
+            validate_tun_config(
+                KernelKind::Mihomo,
+                &serde_json::to_vec(&unsafe_value).unwrap()
+            )
+            .unwrap_err(),
+            "TUN 配置包含外部路径或执行资源：/proxies/0/ws-opts/path"
+        );
     }
     let generated = crate::logic::configuration::make_for(
         KernelKind::SingBox,

@@ -5,10 +5,11 @@ mod tun_transition;
 
 use crate::logic::chain::ChainTrace;
 use crate::logic::dynamic_router::RoutePlan;
-use crate::logic::ranking::NodeRanking;
+use crate::logic::health::MONITOR_INTERVAL_MS;
 use crate::logic::model::{
     LinkMeasurements, NodeLatency, NodeStatus, Preferences, ProbeResult, ProxyNode, RoutingMode,
 };
+use crate::logic::ranking::NodeRanking;
 use crate::services::aggregate_server::AggregateServer;
 use crate::services::core_process::CoreProcess;
 use crate::services::paths;
@@ -61,6 +62,9 @@ pub struct Store {
     pub activity: activity::SharedActivity,
     pub activity_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub monitor_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub pending_recovery: Option<actions::MonitorRecovery>,
+    pub last_auto_recovery: u64,
+    pub auto_recovery_failures: u32,
     pub latency_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub last_update: u64,
     pub last_switch: u64,
@@ -85,7 +89,8 @@ impl Store {
             Some(value) => value,
             None => Preferences::default(),
         };
-        preferences.interval = preferences.interval.clamp(1, 3600);
+        // 断线恢复固定为 10 秒检测；旧偏好里的 60 秒不再沿用。
+        preferences.interval = MONITOR_INTERVAL_MS / 1000;
         // 代理端口非法或与保留端口冲突时回退默认值，避免历史脏数据卡死启动。
         if crate::logic::model::validate_proxy_port(preferences.proxy_port).is_err() {
             preferences.proxy_port = crate::logic::model::DEFAULT_PROXY_PORT;
@@ -160,6 +165,9 @@ impl Store {
             activity: Arc::new(Mutex::new(activity::ActivityData::default())),
             activity_stop: None,
             monitor_stop: None,
+            pending_recovery: None,
+            last_auto_recovery: 0,
+            auto_recovery_failures: 0,
             latency_cancel: None,
             last_update: crate::logic::health::now_ms(),
             last_switch: 0,

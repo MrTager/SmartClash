@@ -7,19 +7,11 @@ pub trait TunRuntime {
     fn enable_system_proxy(&mut self) -> Result<(), String>;
 }
 
-pub fn restart(
-    runtime: &mut impl TunRuntime,
-    tun: bool,
-    system_proxy: bool,
-) -> Result<(), String> {
+pub fn restart(runtime: &mut impl TunRuntime, tun: bool, system_proxy: bool) -> Result<(), String> {
     runtime.stop()?;
-    let result = runtime.start(tun).and_then(|_| {
-        if tun {
-            runtime.verify_tun()
-        } else {
-            Ok(())
-        }
-    });
+    let result = runtime
+        .start(tun)
+        .and_then(|_| if tun { runtime.verify_tun() } else { Ok(()) });
     if let Err(error) = result {
         return match runtime.stop() {
             Ok(()) => Err(error),
@@ -85,7 +77,10 @@ mod tests {
         }
 
         fn enable_system_proxy(&mut self) -> Result<(), String> {
-            assert!(self.running, "never point the system proxy at a stopped core");
+            assert!(
+                self.running,
+                "never point the system proxy at a stopped core"
+            );
             self.events.push("proxy");
             if self.fail_proxy {
                 return Err("proxy failed".into());
@@ -131,7 +126,14 @@ mod tests {
                 ..Default::default()
             };
             let error = restart(&mut runtime, true, true).unwrap_err();
-            assert_eq!(error, if fail_start { "start failed" } else { "verification failed" });
+            assert_eq!(
+                error,
+                if fail_start {
+                    "start failed"
+                } else {
+                    "verification failed"
+                }
+            );
             assert!(!runtime.running);
             assert!(!runtime.tun);
             assert!(!runtime.system_proxy);
@@ -146,7 +148,10 @@ mod tests {
             fail_proxy: true,
             ..Default::default()
         };
-        assert_eq!(restart(&mut runtime, true, true).unwrap_err(), "proxy failed");
+        assert_eq!(
+            restart(&mut runtime, true, true).unwrap_err(),
+            "proxy failed"
+        );
         assert!(runtime.running);
         assert!(runtime.tun);
         assert!(!runtime.system_proxy);

@@ -1,5 +1,5 @@
 use super::kernel::KernelKind;
-use super::model::{ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT, proxy_port};
+use super::model::{proxy_port, ProxyNode, TrafficMode, CONTROLLER_PORT, PROBE_PORT};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -174,10 +174,7 @@ pub fn make_mihomo(
     };
     let mut proxies: BTreeMap<String, Value> = BTreeMap::new();
     for node in nodes.iter().chain(proxy_source.iter()) {
-        proxies.insert(
-            node.name.clone(),
-            Value::Object(node.payload.clone()),
-        );
+        proxies.insert(node.name.clone(), Value::Object(node.payload.clone()));
     }
     let proxies: Vec<Value> = proxies.into_values().collect();
 
@@ -320,12 +317,16 @@ proxies:
         let value: Value = serde_json::from_slice(&config).expect("config is json");
         assert_eq!(value["mode"], "rule");
         let groups = value["proxy-groups"].as_array().expect("proxy-groups");
-        assert!(groups.iter().any(|g| g["name"] == "GLOBAL" && g["proxies"][0] == "SMART"));
+        assert!(groups
+            .iter()
+            .any(|g| g["name"] == "GLOBAL" && g["proxies"][0] == "SMART"));
 
         // 国内直连规则集：订阅 SmartClash-Rules 仓库并置于 MATCH 之前。
         let providers = value["rule-providers"].as_object().expect("rule-providers");
         for name in RULE_PROVIDERS {
-            let provider = providers.get(name).unwrap_or_else(|| panic!("provider {name}"));
+            let provider = providers
+                .get(name)
+                .unwrap_or_else(|| panic!("provider {name}"));
             let filename = match name {
                 "cn-domains" => "direct.yaml",
                 "cn-custom" => "custom-direct.yaml",
@@ -342,8 +343,15 @@ proxies:
             .iter()
             .position(|r| r == "MATCH,SMART")
             .expect("MATCH rule");
-        for rule in ["RULE-SET,cn-domains,DIRECT", "RULE-SET,cn-custom,DIRECT", "RULE-SET,cn-ips,DIRECT"] {
-            let index = rules.iter().position(|r| r == rule).unwrap_or_else(|| panic!("rule {rule}"));
+        for rule in [
+            "RULE-SET,cn-domains,DIRECT",
+            "RULE-SET,cn-custom,DIRECT",
+            "RULE-SET,cn-ips,DIRECT",
+        ] {
+            let index = rules
+                .iter()
+                .position(|r| r == rule)
+                .unwrap_or_else(|| panic!("rule {rule}"));
             assert!(index < match_index, "{rule} must precede MATCH");
         }
     }
@@ -377,8 +385,17 @@ proxies:
     /// 直连模式必须能在没有任何订阅节点时启动内核。
     #[test]
     fn direct_mode_without_nodes_passes_mihomo_check() {
-        let config = make(&[], "secret", false, None, &[], None, None, TrafficMode::Direct)
-            .expect("build node-less direct config");
+        let config = make(
+            &[],
+            "secret",
+            false,
+            None,
+            &[],
+            None,
+            None,
+            TrafficMode::Direct,
+        )
+        .expect("build node-less direct config");
         check_with_core(&config, "direct");
         let value: Value = serde_json::from_slice(&config).expect("config is json");
         assert_eq!(value["mode"], "direct");
@@ -389,7 +406,17 @@ proxies:
             .expect("SMART group");
         assert_eq!(smart["proxies"][0], "DIRECT");
         assert!(
-            make(&[], "secret", false, None, &[], None, None, TrafficMode::Global).is_err(),
+            make(
+                &[],
+                "secret",
+                false,
+                None,
+                &[],
+                None,
+                None,
+                TrafficMode::Global
+            )
+            .is_err(),
             "global mode still requires at least one node"
         );
     }
@@ -409,7 +436,13 @@ proxies:
 
         let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/mihomo.exe");
         let output = Command::new(core)
-            .args(["-t", "-d", dir.to_str().unwrap(), "-f", path.to_str().unwrap()])
+            .args([
+                "-t",
+                "-d",
+                dir.to_str().unwrap(),
+                "-f",
+                path.to_str().unwrap(),
+            ])
             .output()
             .expect("run mihomo -t");
         let _ = std::fs::remove_dir_all(&dir);
