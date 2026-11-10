@@ -1,3 +1,5 @@
+> **SmartClash：** 本目录是 SmartClash 的桌面主线。请先阅读 [项目 README](../README.md) 和 [SmartClash 实现说明](SMARTCLASH.md)。下文为保留的 Clash Verge Rev 上游文档，其中的发布下载地址对应上游原版。
+
 <h1 align="center">
   <img src="./src-tauri/icons/icon.png" alt="Clash" width="128" />
   <br>
