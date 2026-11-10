@@ -1,232 +1,36 @@
-# SmartClash · Intel Mac 智能代理客户端
+# SmartClash
 
-原生 SwiftUI 桌面客户端 + Mihomo 内核。目标：macOS 13 及以上、Intel x86_64（包括 2020 Intel MacBook Pro）。
+SmartClash 直接基于 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev) **v2.5.10**，采用 Tauri + React + Rust。项目只保留这一套桌面主线，源码位于 [`verge/`](verge/)。上游版本和提交记录在 [`UPSTREAM.json`](verge/UPSTREAM.json)。
 
-**交付状态：源码实现版，尚未经过 macOS 编译和实机网络验收。当前生成环境为 Linux，没有 macOS SDK。此压缩包不是已验证的 DMG。** 首次使用请按照下面的步骤在 Mac 构建；编译通过、真实订阅、系统代理和 TUN 授权均需在 macOS 验证。
+## 功能
 
-**本机更新记录（2026-11-04，v0.4.1）优先于历史交付状态：** 已在 Intel macOS 完成构建与自动化测试；新增连接前 HTTPS 出网验证、节点延迟测试与排序。TUN 管理员授权与接管后的实机验证是独立验收项，不能以编译通过替代。
+- 沿用上游订阅管理、Mihomo 内核生命周期、系统代理、TUN、连接、规则、日志与流量统计。
+- SmartClash 低延迟、高速、AI 三种选路模式，真实 HTTPS/OpenAI 检测、备用预热与故障切换。
+- 多订阅聚合与去重、显式多跳、有限预算的自动双跳探索。
+- 可选 SmartClash 国内直连规则、本机聚合订阅链接及 YAML 导出。
+- 全球连接地球：旋转、缩放、请求弧线、流动粒子和请求聚焦；未知位置不会编造地理坐标。
 
-## 快速构建
+## 开发与构建
 
-1. Mac 安装 Xcode 15+ 或 Swift 5.9+ Command Line Tools：`xcode-select --install`。Xcode 16.2 可以使用。
-2. 解压项目，终端进入项目根目录。
-3. 执行：
+需要 Node、pnpm、Rust 及各平台的 Tauri 构建工具。具体版本见 `verge/package.json` 和 `verge/rust-toolchain.toml`。Windows 正常构建使用 MSVC 及 C++ Build Tools。
 
-```bash
-bash script/package.sh
+```powershell
+cd verge
+pnpm install --frozen-lockfile
+pnpm prebuild x86_64-pc-windows-msvc
+pnpm dev
 ```
 
-也可以双击 `Build.command`。脚本会下载官方 Mihomo Intel 内核、校验 GitHub 发布资源的 SHA-256、解析 Yams 依赖、执行单元测试、编译 x86_64、签名并生成：
+正式构建运行 `pnpm build`。`prebuild` 会准备相应平台的 Mihomo、服务与 Geo 资源。完整功能和构建说明见 [`verge/SMARTCLASH.md`](verge/SMARTCLASH.md)。
 
-- `dist/SmartClash.app`
-- `dist/SmartClash-Intel.dmg`
+## 验证与当前边界
 
-首次构建需要能访问 GitHub、api.github.com 和 GitHub 下载域名的网络。可先使用现有代理；终端不会总是自动使用系统代理，可设置：
+本机已完成前端构建、类型检查、37 项前端测试、367 项 Rust 库测试及架构检查；Windows 预览已启动并验证地球旋转和缩放。
 
-```bash
-export https_proxy=http://127.0.0.1:7890
-export http_proxy=http://127.0.0.1:7890
-bash script/package.sh
-```
+本机正在使用的旧 Clash Verge 服务与当前主线要求的服务版本不兼容。尚未替换系统服务，真实节点故障切换与系统代理/TUN 接管仍需实网验收。启动时可选择“稍后配置服务，先查看界面”。macOS/Linux 打包和服务集成仍需对应平台验证。
 
-端口请改成现有代理的实际端口。内核固定为 Mihomo v1.19.33 compatible Intel 资产；如需手动提供可信内核：`MIHOMO_BINARY=/绝对路径/mihomo bash script/fetch_core.sh`。
+应用数据保存在独立的 `io.github.mrtager.smartclash` 目录。已有订阅需要从“订阅”页面导入。SmartClash 应用自动更新在独立签名更新源准备好前保持关闭。
 
-默认采用本机 ad-hoc 签名，未进行 Developer ID 签名或 Apple 公证。自己在 Mac 上构建可本地使用；分发给其他人时，需要有效 Developer ID 和公证。可设置 `SIGNING_IDENTITY`，以及已配置的 Keychain `NOTARY_PROFILE` 后执行打包脚本。项目不包含开发者证书。
+## 许可
 
-项目带 GitHub Actions Intel macOS 构建工作流，但未替你创建仓库、上传源码或运行远程构建。
-
-## 使用
-
-1. 启动应用，进入「订阅聚合」，添加一个或多个 **HTTPS Clash YAML / JSON 订阅**。
-2. 点击「更新订阅」。节点按服务器、协议、认证和传输配置去重，来源名称不同不影响去重。重名节点会加稳定指纹后缀。
-3. 点击「系统代理 → 一键开启」，首次允许管理员授权安装后台服务。之后开关系统代理和 TUN 不再重复询问密码，重开应用、重启电脑后继续有效。会开启所有当前启用网络服务的 HTTP、HTTPS、SOCKS 代理。
-4. 需要虚拟网卡时点击「一键开启 TUN」。与系统代理共用已安装的后台服务，无需另行授权。TUN 与系统代理可以单独控制。切换 TUN 会重启内核并恢复原系统代理设置；TUN 自行接管路由，无需同时开启系统代理。
-5. 智能检测默认每分钟执行，支持 1 秒、5 秒、15 秒、1 分钟、5 分钟。网络请求串行、不会重叠；实际周期为请求/扫描耗时加设定间隔。改变间隔会在下一轮睡眠使用新值。
-6. 复制「本机订阅链接」即可导入其他 Clash 客户端，或导出 YAML 文件。文件内容使用 YAML 1.2 兼容的 JSON 语法，Clash/Mihomo 可读取。链接只在此 Mac、此应用保持运行时可用；其他客户端应直连更新此链接。
-7. 正常退出会先恢复旧系统代理，再停止内核 / 卸载 TUN 内核服务；保留已授权的后台服务供下次使用。首次安装取消授权时不会修改系统代理；恢复失败时保留记录并显示恢复提示。
-
-系统代理和 TUN 之外还可「仅启动内核」，供指定应用使用本地 HTTP / SOCKS 端口。
-
-## OpenAI 检测和切换
-
-- 检测实际访问 `https://api.openai.com/v1/models`，不需要 API Key，不进行模型推理、不产生模型 API 调用费用。
-- 返回结构化的缺少 API Key 的 401 响应，表示 API 端点可达；标准模型列表 JSON 也视为可达。
-- 明确的地区限制、连接失败、超时、5xx 计为失败；连续 2 次失败，且距上次切换至少 30 秒，才开始选备用出口。
-- 429 限流、403 验证挑战、未知页面不自动判为坏节点，避免把账号或平台限制误当出口失效。
-- 备用节点通过独立 `PROBE` 组和 HTTP 监听端口检测，不影响正在使用的 `SMART` 组。
-- 每轮最多扫描 12 个备用节点；失败节点冷却 60 秒；轮转覆盖后续节点。发现延迟小于 1500ms 的可用节点可提前结束，否则选择本批已验证节点中延迟最低者。
-- 所有备用节点失败时保留当前节点并等待下一轮，不降级成直连外网。
-- 只有故障时才换出口，不为几毫秒差异反复换 IP。手动选节点后同样冷却 30 秒。
-- **这不保证 ChatGPT 网页登录、验证码、账号权限或地区资格可用，也不保证服务永不掉线。** 切换只作用于新连接；已经建立的 TCP、WebSocket 或正在生成的响应可能中断，需要应用自身重连/重试。
-- 1 秒模式会更频繁访问 OpenAI；推荐使用默认 60 秒。
-
-## 聚合格式与当前范围
-
-支持含 `proxies` 的 Clash YAML / JSON，常见 SS、SSR、VMess、VLESS、Trojan、Hysteria/2、TUIC、HTTP、SOCKS5、Snell、AnyTLS 节点。具体字段是否被当前内核接受，会在启动前进行 `mihomo -t` 校验。
-
-当前不支持 Base64 URI 列表（ss://、vmess:// 等）、仅有 proxy-providers 的远程配置、节点链引用、脚本/插件及依赖本地证书文件的节点。不会执行第三方订阅转换服务，也不会发送订阅给外部转换网站。若订阅服务能提供 Clash 格式，请选用其 Clash/Mihomo 订阅链接。
-
-本地兼容修正：支持将旧式 VMess WebSocket 的 `ws-path` / `ws-headers` 规范化为 `ws-opts`；允许 Mihomo 内建的 SS `obfs` 传输（仅 `http` / `tls` 模式与 `host` 参数），仍拒绝外部插件和本地文件引用。配置输出不转义 `/`，以兼容内核的 YAML 解析器。
-
-### 从本机 Clash Verge 导入全部配置
-
-先正常退出 SmartClash，然后执行：
-
-```bash
-swift run --arch x86_64 SmartClashImport --check
-swift run --arch x86_64 SmartClashImport --apply
-bash script/package.sh
-bash script/build_and_run.sh --install
-```
-
-导入器只读取用户级 Clash Verge `profiles.yaml` 以及对应的 `profiles/*.yaml`，不下载订阅、不访问其受保护系统目录、不改变系统代理或 TUN。来源数量由本机配置决定；所有 remote/local 配置均保留，各自缓存仅含 `proxies`。HTTPS 远程来源保留原更新地址，本地来源在更新时保留离线快照；若要再次导入原客户端中的本地修改，退出 SmartClash 后重新运行导入器。
-
-默认读取 `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev`，写入 `~/Library/Application Support/SmartClash`；可通过 `--source-directory` 和 `--destination` 指定其他目录。写入前先校验所有来源，已有且将被更新的 SmartClash 文件会备份至其数据目录中的 `pre-import-*` 私有目录。配置、缓存及备份含凭据，请勿提交到 Git。重复导入按原配置 UID 保留相同来源 ID，不会重复增加来源。
-
-`--install` 仅在 `/Applications/SmartClash.app` 尚不存在时安装并启动，避免直接覆盖已有应用。普通开发仍使用 `bash script/build_and_run.sh --verify`。
-
-正常模式手动/每小时更新订阅，更新失败保留该来源缓存。TUN 模式为避免普通 GUI 改写 root 配置，需先停止后手动更新。增删来源前需停止内核。首次添加后需手动更新。
-
-本机聚合链接不是公网托管服务，不能给手机或其他电脑直接使用。导出订阅内含节点密码，使用者应按敏感凭据保存。
-
-## 流量模式与规则订阅
-
-概览「流量模式」、菜单「代理」和菜单栏提供三种模式。运行中点击即切换，停止时保存选择，下次连接生效；与「低延迟 / 高速 / AI」线路选择策略分别设置。
-
-- **规则代理（默认）**：回环、RFC1918 私网、`.local`、`.lan` 直连；国内域名、定制补充域名与国内 IP 按自有规则仓库直连，未匹配流量走当前 SMART 节点或链路。不额外下载 GeoIP / GeoSite，也不增加基于 GEOIP 的国内兜底。
-- **全局代理**：进入内核的业务流量全部走当前 SMART 出口。GLOBAL 绑定 SMART，智能故障切换和多跳选路会同步影响全局出口；跳过分流及广告屏蔽规则。
-- **直连**：进入内核的业务流量全部 DIRECT，系统代理和 TUN 可以保持开启；不依赖订阅节点，不自动检测或切换代理节点。
-
-模式切换使用内核 `rule / global / direct`，成功确认后保存，并关闭旧连接，避免旧 TCP / UDP 会话沿用原模式；应用可能需要重试进行中的请求。切换失败会尝试恢复原模式。系统代理只接管遵循系统设置的应用，更多应用需要 TUN；流量模式与接管方式独立。
-
-规则源为 [MrTager/SmartClash-Rules](https://github.com/MrTager/SmartClash-Rules)，从 `main/rules/` 下载 `direct.yaml`、`custom-direct.yaml`、`cncidr.yaml`，转换为国内域名与 IP 直连规则集，不再下载第三方屏蔽 / 指定代理模块。应用启动时检查缓存时效，运行期间**每小时更新**，与节点订阅更新、健康检测间隔独立；暂停代理、全局、直连和 TUN 期间也会更新。失败保留最近完整缓存，5 分钟后重试，支持「立即更新规则」。退出应用期间不更新，下次启动补查。
-
-规则首先从 GitHub Raw 获取，失败时尝试同一自有仓库的 jsDelivr 镜像（内容可能滞后）。三份 YAML 均下载、解析且非空后才发布；校验 payload、域名条目和 IP 网段，去除重复项。缓存记录来源，不再使用旧第三方源缓存。首次尚无当前源缓存且无法下载时，规则代理拒绝连接，可选择全局或直连。
-
-转换结果保存在应用数据目录 `routing-rules.json`。内核通过带令牌的本机规则地址加载并热更新，TUN 不需要修改 root 配置或重复管理员授权。聚合订阅和导出仍只提供原始节点池，不携带本应用的流量模式、规则订阅及本机控制密钥。
-
-## 权限、进程和恢复
-
-- 普通模式：GUI 用户进程启动 Mihomo；TUN 模式：由已授权的后台服务将内核和配置写入 root 专用目录，通过固定 launchd 服务 `com.smartclash.core` 启动。
-- 首次安装后台服务 `com.smartclash.helper` 需要一次管理员授权。后台服务以 root 运行，签名校验和用户 UID 限制调用方，只开放固定的系统代理及 TUN 操作；不保存密码、不配置免密 sudo，也不接受任意命令。退出、停止和关闭 TUN 均保留该服务。
-- 当前本地 ad-hoc 签名的应用在重新构建 / 更新后签名会变化，首次使用新版可能需要再授权安装服务。系统设置撤销后台权限后需手动重新允许；服务暂不可用不会自动反复弹出管理员密码框。
-- TUN 不是 Apple Network Extension；使用 Mihomo 的 utun 和自动路由，需要管理员权限。GUI 本身不以 root 运行。
-- root 配置在 `/Library/Application Support/SmartClashCore`，服务清单在 `/Library/LaunchDaemons/com.smartclash.core.plist`。停止 TUN 会卸载服务并删除这些专用文件。
-- 系统代理开关先记录原设置，再修改；恢复成功后才删除备份。已有认证代理时拒绝修改，因为无法完整备份其密码。PAC 设置和代理绕过列表不由本应用修改；若启用了 PAC/自动发现策略，应用会提示先在系统设置关闭，避免优先级冲突。
-- 应用工作数据在 `~/Library/Application Support/SmartClash`，目录 0700，订阅/配置/凭据文件 0600。日志仍可能包含服务器地址等诊断信息，请按敏感文件处理。
-- 本地控制 API 仅监听回环地址，并使用随机密钥；聚合订阅使用独立随机 URL 令牌，仅监听回环地址。
-- 普通内核记录 PID，异常退出后恢复操作只会终止可验证为本应用内核路径的遗留进程；不会按通用 mihomo 名称杀进程。
-- 如强制退出、崩溃或重启留下设置，下次启动请点「恢复网络」。root TUN 服务在 GUI 崩溃后可能继续运行；正常退出或恢复网络会卸载。不要直接拖走正在使用的应用。
-- 本地混合代理和 PROBE 端口不要求认证；同一 Mac 的其他本地进程可使用这些端口，设计适用于单用户可信设备。
-
-若 GUI 无法启动，可在终端先卸载 TUN，再到系统设置 → 网络 → 当前服务 → 详细信息 → 代理，关闭指向 `127.0.0.1:7890` 的代理。仅在确认属于本应用时执行：
-
-```bash
-sudo launchctl bootout system/com.smartclash.core
-sudo rm -f /Library/LaunchDaemons/com.smartclash.core.plist
-sudo rm -rf '/Library/Application Support/SmartClashCore'
-```
-
-随后修复/重建应用再使用其保存的代理备份进行恢复。请勿在排查前删除应用工作数据中的 `proxy-backup.json`。
-
-完全卸载时，先在应用中「停止并恢复网络」并退出，再移除后台服务（以下操作本身需要管理员权限）：
-
-```bash
-sudo launchctl bootout system/com.smartclash.helper
-sudo rm -f /Library/LaunchDaemons/com.smartclash.helper.plist
-sudo rm -f /Library/PrivilegedHelperTools/com.smartclash.helper
-sudo rm -rf '/Library/Application Support/SmartClashHelper'
-```
-
-## 开发与验证
-
-```bash
-swift test --arch x86_64
-bash script/build_and_run.sh
-bash script/build_and_run.sh --verify
-```
-
-源码按 `ProxyLogic`（解析、去重、配置、健康判定）和 `SmartClash`（界面、进程、网络代理、订阅服务、监控）拆分。单元测试覆盖去重、不同凭据、远程配置隔离、PROBE 通道、敏感错误脱敏、导出可再次导入、响应分类、失败阈值与冷却等。测试源码已提供，需在 macOS 实际执行。
-
-实机验收步骤与当前验证记录见 `VALIDATION.md`。构建脚本会在测试失败时停止，不会继续出包。
-
-## 开源组件
-
-本项目采用 GPL-3.0-or-later。代理内核 Mihomo 采用 GPL-3.0，Yams 采用 MIT；详见 `LICENSE` 和 `THIRD_PARTY_NOTICES.md`。此项目不是 Clash、Mihomo 或 OpenAI 的官方客户端。
-
-## v0.2：智能双跳链式代理
-
-新增「链式代理」页面。先停止内核，启用双跳，勾选入口候选（例如香港）和出口候选（例如美国），再开启系统代理或 TUN。
-
-路径：本机 → 香港入口 → 美国出口 → OpenAI。美国出口节点通过 Mihomo `dialer-proxy` 指向原始香港入口。SMART 与 PROBE 都只选择生成的完整链路，后台按已有失败阈值、冷却和分批扫描策略在入口/出口组合之间切换。不会退回单跳，失败时不会直连公网。
-
-不按节点名称自动猜测地区；需要你确认并选择候选池。规则模式按订阅分流，需要代理的流量使用所选链路；全局模式全部业务流量使用该链路；直连模式不使用链路。实际出口地区以服务商及检测结果为准。
-
-最多 128 个入口×出口组合，排除同节点自连接；支持 TCP/HTTPS，暂不支持 UDP 专用协议及 SSR。订阅里的外部 dialer-proxy 仍不导入，链路仅由本机选择生成。旧设置文件可读取，默认关闭链式模式。聚合链接和 YAML 导出仍为原始节点池，不携带本机链式设置。
-
-链路配置和新增 6 个测试尚未在 macOS 编译/执行；需按 VALIDATION.md 实机验证入口连接、出口 IP、整链 OpenAI 检测与故障切换。
-
-官方实现说明：https://wiki.metacubex.one/en/config/proxies/dialer-proxy/
-
-## v0.4：一键动态组网与预热备用（当前说明优先于上述历史版本）
-
-界面无需选择入口、出口、地区或跳数。概览/链式代理页面只有一个核心按钮「一键打通」，成功后开启系统代理，再次点击停止并恢复网络；首次后台服务安装授权由 macOS 系统弹窗完成。原有系统代理和 TUN 控制继续保留。
-
-后台按节点池、搜索轮次和资源预算生成无重复节点的可变长度路径，而非固定双跳/三跳；逐级 dialer-proxy 实现真实多跳。每轮最多 12 个候选，最大长度由节点数和该预算共同限制，不超过 12 跳。包括单跳候选，不承诺美国出口；地区约束需另加机制。UDP 专用协议仅参与单跳，TCP 兼容节点参与多跳。预算搜索不穷举全部排列，不保证全局最优或发现所有理论可用线路。
-
-首次搜索按约 24 秒预算分批探测（正在进行的请求可额外耗时最多 8 秒），没有可用结果时保留后台探索，不显示成功、不启用新的系统代理。用户订阅需先添加；节点为空时按钮尝试更新现有订阅。
-
-找到主线后，独立主线监控与后台备用探测同时运行：主线通过 SMART 业务监听检测，备用通过串行锁保护的 PROBE 监听检测，不改变业务出口。智能模式每次主线检测完成后等待 1 秒再检测；备用任务每次探测后等待 1 秒，不表示所有线路都每秒完成一次请求。
-
-备用结果仅在最近 15 秒验证为 healthy 时有资格立即切换，按最近测得延迟优先。主线发生明确连接/地区失败后，有新鲜备用时跳过原 30 秒冷却和连续失败阈值，直接调用 SMART 组切换；限流/未知验证页仍不触发。无新鲜备用时按连续失败阈值重新探索。备用候选每约 60 秒动态刷新，保留主线、至多两条新鲜备用以及依赖定义，防止跨轮内存无限增长。配置更新短暂串行，主线检测会跳过忙碌时段。
-
-这实现的是“预热备用 + 自动快速切换新连接”，不是现有 TCP 会话迁移。API 探测最坏 8 秒超时、调度、配置更新和本地控制调用都影响实际故障发现及切换耗时，不能保证零中断。正在生成的响应、已建立的 WebSocket/TCP 仍可能失败，调用端应重连/重试。未自动重放 POST，避免重复请求或扣费。最近验证可用也不保证切换瞬间仍然可用。
-
-旧手动链式选项仅保留数据兼容，不再用于运行时选路。动态模式运行中暂停订阅刷新；停止后可更新再一键打通。聚合链接/YAML 仍仅导出原始节点池。代码尚未在 macOS 编译及真实线路验证。
-
-## v0.4.1：出网验证、延迟测速与排序（本节优先于历史版本）
-
-- 连接前先用本机非 TUN 内核检测 HTTPS 出网，按来源交错检查候选，优先复用新鲜的已测成功结果。只有真实业务监听也返回预期响应后，才开启新的系统代理。
-- 默认单跳优先，不再直接把系统流量交给未验证的长链。多跳探索仍可在“链式代理”页面显式开启。
-- TUN 前先验证线路，再保留同一节点启动 TUN；按当前默认路由解析物理出口，而不是假定 Wi-Fi 网卡。若发现另一 VPN 已接管默认路由，拒绝叠加 TUN。接管后重新检测，失败则尝试恢复；管理员若取消恢复授权，界面保留“恢复网络”提示。
-- 为代理服务器域名提供独立的 IPv4 DNS，并在 TUN 模式绑定已识别的出口，降低 DNS 引导与 VPN 路由相互依赖的风险。
-- “节点”页提供全部测速、单节点测速、进度、取消、延迟升序 / 名称 / 原始顺序。6 路并发，节点请求超时预算 5 秒；失败不会显示成 `0 ms`，未测与失败节点排在成功节点之后。
-- 测速调用内核的独立节点延迟接口，不改变 SMART 业务组。若内核尚未运行，只启动本机内核，不开启系统代理或 TUN。结果私有保存在应用数据目录的 `latencies.json`。
-- 选择节点也需通过出网测试，失败时保留或恢复原出口。普通 HTTPS 连通性与 OpenAI API 检查分开展示，避免把地区/账号限制当作所有网络均不可用。
-
-安全更新已安装应用：先正常退出 SmartClash，再运行 `bash script/build_and_run.sh --update`；旧应用会保存在项目 `dist/SmartClash-installed-backup-*.app`。`ruby script/check_network.rb` 可使用临时隔离内核抽测缓存节点（`--all` 为全部），不会接管系统网络，也不输出节点凭据。
-
-## v0.5.0：可视化链路、三种模式与流量面板
-
-本节优先于历史版本说明。保留原订阅、本地缓存、图标与多跳探索设置。
-
-1. **后台执行**：连接、自动寻找线路、更新订阅、手动切换和节点测速都不显示加载动画，也不因检测而禁用页面或菜单按钮。新操作取消旧操作，等待取消清理后执行；停止优先取消检测并恢复网络。测速保留已有延迟结果，只显示文字计数，完成后自动更新。重复健康信息去重发布，应用图标只解码一次，实时流量由独立观察对象更新。
-2. **真实链路图**：依据生效节点及 `dialer-proxy` 引用，还原“本机 → 入口 → 中间节点 → 出口 → 目标”。展示跳数、协议、备用数和网络/OpenAI 状态；缺失引用或循环会明确标记不完整，不以动画冒充连接。
-3. **低延迟模式**：优先选择实测 HTTPS 延迟较低且业务出网验证通过的候选。
-4. **高速模式**：对最多 3 个候选分别通过独立 PROBE 监听下载 1 MiB，以下载字节/秒排序，展示 Mbps；一轮约消耗 3 MiB 测速流量。短时抽测不代表持续下载带宽，不会拿延迟假造吞吐，也不保证找到所有节点中的全局最优。
-5. **AI 模式**：候选必须通过真实 OpenAI API 检查；结构化的无密钥认证响应可以确认 API 端点可达，不代表账号、网页登录、验证码或付费权限。其他模式不再仅因 OpenAI 地区限制而把正常互联网线路判为全断。
-6. **实时流量**：从内核 `/traffic` 读取上传/下载速率及累计字节，显示最近 60 秒曲线、本次内核运行累计和历史累计。历史从本功能开始记录，不能还原旧版本未记录的数据。统计以内核上报为准，测速/探测可能计入；不是全电脑流量或服务商账单。
-
-选择模式只保存偏好，连接时生效；已有连接需点击“按此模式重新选路”。验证失败会尝试保留原出口，不能把未确认的 AI/带宽结果标为成功。PROBE 组可测试原始节点与生成链路，不改 SMART 业务选择。
-
-本机数据新增 `link-measurements.json` 和 `traffic-history.json`，仍使用私有目录/文件权限。构建 `dist` 不再退出正在使用的 `/Applications/SmartClash.app`；安装更新则要求先正常退出，以免擅自中断代理。
-
-验收命令：
-
-```bash
-swift test --arch x86_64
-# 仅在本机内核已运行时启用只读流量集成验证；离线 UI 验证不改网络。
-SMARTCLASH_LIVE_TEST=1 SMARTCLASH_RENDER_PREVIEW=1 swift test --arch x86_64
-bash script/package.sh
-```
-
-离线 UI 预览生成于 `dist/chain-ui-preview-0.5.0.png`，清楚标记为示例数据；最终安装后的真实连接与管理员授权验收仍需单独完成。
-
-## v0.6：3D 地球、请求连线与实时流量
-
-- 概览、节点和链式代理页面新增可拖动旋转、滚轮缩放的原生 3D 地球。青色标记代理节点，橙色标记请求目标；弧线与沿线动画展示活跃连接的地理关系。
-- 数据来自本机内核 `/connections`，按每条连接自己的 `chains` 与 `dialer-proxy` 显示节点。切换出口后，尚未结束的旧连接继续显示原节点；不会把当前选择套用到所有连接。点击「查看实时请求」可按请求聚焦连线。
-- 优先按目标 `destinationIP` 定位；内核仅提供域名时，使用本机 DNS 解析后的公网 IP 估算，并标注「DNS 估算」。`remoteDestination` 是代理对端，不用于冒充网站目标。CDN、Anycast、远程 DNS 与中转服务器会使位置与实际出口存在差异；连线不是物理路由追踪。缺少位置、直连和私网请求仍保留在列表中。
-- 位置查询通过 HTTPS 访问 ipwho.is，仅发送公网 IP，不发送订阅、认证信息、节点名称或访问域名。位置缓存保留 24 小时，查询按顺序限速，失败时不影响代理及流量显示；地球底图为随应用打包的 Natural Earth 公共领域数据，无需地图密钥或在线瓦片。
-- 侧栏常驻上传/下载速度，概览和节点页顶部也显示实时速度；新增「实时流量」页面，显示最近 60 秒曲线、本次内核累计与本机历史累计。
-- `/traffic` 自动重连，流量流暂不可用时使用 `/connections` 的累计字节差恢复速率。两种来源交错到达时不会重复累计；停止或断线后清零当前速度并保留历史累计。
+遵循 GPL；保留上游许可证与来源记录，详见 [`LICENSE`](LICENSE)、[`verge/LICENSE`](verge/LICENSE) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

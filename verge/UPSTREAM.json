@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/clash-verge-rev/clash-verge-rev",
+  "tag": "v2.5.10",
+  "commit": "c83f7ad529c7c9cb3d2d54a0955ef8c1b22a411b",
+  "license": "GPL-3.0-only",
+  "integration": "Vendored source with SmartClash extensions; no nested git repository"
+}
