@@ -169,7 +169,9 @@ async fn init_auto_backup() {
 
 async fn init_silent_updater() {
     // The fork has no signed update feed; upstream releases would replace SmartClash.
-    if !crate::constants::SMARTCLASH_UPDATER_ENABLED { return; }
+    if !crate::constants::SMARTCLASH_UPDATER_ENABLED {
+        return;
+    }
     use crate::core::SilentUpdater;
     use crate::core::handle::Handle;
 

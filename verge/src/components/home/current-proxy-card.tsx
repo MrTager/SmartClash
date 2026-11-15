@@ -40,6 +40,7 @@ import type { ProxySortType } from '@/components/proxy/use-filter-sort'
 import { useGroupDelays } from '@/hooks/use-group-delays'
 import { useProfiles } from '@/hooks/use-profiles'
 import { useProxySelection } from '@/hooks/use-proxy-selection'
+import { useSmartClash } from '@/hooks/use-smartclash'
 import { useVerge } from '@/hooks/use-verge'
 import {
   useAppRefreshers,
@@ -617,6 +618,7 @@ export const CurrentProxyCard = () => {
 
   const [selectedGroupName, setSelectedGroupName] = useState('')
   const [openSelect, setOpenSelect] = useState<OpenSelect>(null)
+  const { data: smartData } = useSmartClash()
 
   useEffect(() => {
     setOpenSelect(null)
@@ -657,6 +659,28 @@ export const CurrentProxyCard = () => {
     selectableGroups,
     selectedGroupName,
   ])
+
+  // When SmartClash rules carry all proxy traffic, any other displayed group is
+  // off the traffic path; surface that instead of implying its pick is live.
+  const smartGroup = useMemo(
+    () => selectableGroups.find(({ name }) => name === 'SMARTCLASH') ?? null,
+    [selectableGroups],
+  )
+  const smartCarriesTraffic =
+    (smartData?.settings.enabled ?? false) &&
+    (smartData?.settings.smartRules ?? false) &&
+    smartGroup !== null
+  const trafficMismatch =
+    smartCarriesTraffic &&
+    selectedGroup !== null &&
+    selectedGroup.name !== 'SMARTCLASH'
+  const trafficHint =
+    trafficMismatch && smartGroup
+      ? {
+          group: selectedGroup!.name,
+          route: smartGroup.now ?? '检测中…',
+        }
+      : null
 
   const optionsForGroup = useCallback(
     (group: ProxyGroupView | null): ProxyOption[] =>
@@ -1015,6 +1039,36 @@ export const CurrentProxyCard = () => {
         <Box sx={{ py: 4, height: 24 }} />
       ) : currentProxy || (!isDirectMode && selectedGroup) ? (
         <Box>
+          {trafficHint && (
+            <Box
+              sx={{
+                mb: 1.5,
+                px: 1.25,
+                py: 0.75,
+                borderRadius: 1.5,
+                bgcolor: 'info.main',
+                color: 'info.contrastText',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                flexWrap: 'wrap',
+              }}
+            >
+              <Typography variant="caption" sx={{ minWidth: 0 }}>
+                智能选路生效中，流量走 SMARTCLASH →{' '}
+                {trafficHint.route}。「{trafficHint.group}
+                」的当前选择不承载流量。
+              </Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                sx={{ flexShrink: 0, ml: 'auto', color: 'inherit' }}
+                onClick={() => setSelectedGroupName('SMARTCLASH')}
+              >
+                查看生效组
+              </Button>
+            </Box>
+          )}
           <Box
             sx={{
               display: 'flex',
@@ -1027,8 +1081,13 @@ export const CurrentProxyCard = () => {
               border: `1px solid ${alpha(theme.palette.primary.main, 0.1)}`,
             }}
           >
-            <Box>
-              <Typography variant="body1" sx={{ fontWeight: 'medium' }}>
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography
+                variant="body1"
+                noWrap
+                title={currentProxy?.name}
+                sx={{ fontWeight: 'medium' }}
+              >
                 {currentProxy?.name ??
                   t('home.components.currentProxy.labels.noActiveNode')}
               </Typography>
@@ -1082,6 +1141,7 @@ export const CurrentProxyCard = () => {
                 size="small"
                 label={delayManager.formatDelay(currentDelay)}
                 color={convertDelayColor(currentDelay)}
+                sx={{ flexShrink: 0, ml: 1 }}
               />
             )}
           </Box>

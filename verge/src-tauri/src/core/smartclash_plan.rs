@@ -257,6 +257,10 @@ pub fn inject(config: &mut Mapping, plan: &Plan, selected: Option<&str>) -> Resu
         }
     }
     groups.push(group.into());
+    // The traffic carrier leads the list so the proxy page opens on the live route.
+    let last = groups.len() - 1;
+    let group = groups.remove(last);
+    groups.insert(0, group);
     config.insert("proxies".into(), proxies.into());
     config.insert("proxy-groups".into(), groups.into());
     Ok(())
@@ -313,10 +317,10 @@ secret: fixture
         for key in ["rules", "dns", "tun", "external-controller", "secret", "proxies"] {
             assert_eq!(result[key], original[key]);
         }
-        assert_eq!(result["proxy-groups"][0]["proxies"][0].as_str(), Some("HK01"));
-        assert_eq!(result["proxy-groups"][0]["proxies"][3].as_str(), Some(GROUP));
-        assert_eq!(result["proxy-groups"][1], original["proxy-groups"][1]);
-        assert_eq!(result["proxy-groups"][2]["proxies"][0].as_str(), Some("JP01"));
+        assert_eq!(result["proxy-groups"][0]["name"].as_str(), Some(GROUP));
+        assert_eq!(result["proxy-groups"][1]["proxies"][0].as_str(), Some("HK01"));
+        assert_eq!(result["proxy-groups"][1]["proxies"][3].as_str(), Some(GROUP));
+        assert_eq!(result["proxy-groups"][2], original["proxy-groups"][1]);
         Ok(())
     }
 

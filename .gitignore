@@ -12,6 +12,7 @@ dist/
 preferences.json
 subscription-*.yaml
 subscription-*.yml
+subscriptions-info.yaml
 config.local.*
 *.log
 

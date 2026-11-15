@@ -3,8 +3,8 @@ mod chain;
 pub mod field;
 mod merge;
 mod script;
-pub(crate) mod smartclash;
 pub mod seq;
+pub(crate) mod smartclash;
 mod tun;
 
 use self::{
@@ -966,13 +966,21 @@ pub async fn enhance(
     let settings = crate::config::smartclash::load().await?;
     smartclash::aggregate(&mut config, profiles, &settings).await?;
     let plan = crate::core::smartclash_plan::build(&config, &settings)?;
-    let selected = profiles.current.as_ref()
+    let selected = profiles
+        .current
+        .as_ref()
         .and_then(|uid| profiles.get_item(uid).ok())
         .and_then(|item| item.selected.as_ref())
-        .and_then(|items| items.iter().find(|item| item.name.as_deref() == Some(crate::core::smartclash_plan::GROUP)))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.name.as_deref() == Some(crate::core::smartclash_plan::GROUP))
+        })
         .and_then(|item| item.now.as_deref());
     crate::core::smartclash_plan::inject(&mut config, &plan, selected)?;
-    if settings.enabled && settings.smart_rules { smartclash::rules(&mut config)?; }
+    if settings.enabled && settings.smart_rules {
+        smartclash::rules(&mut config)?;
+    }
     let config = use_sort(config);
 
     let mut exists_keys_set = HashSet::new();

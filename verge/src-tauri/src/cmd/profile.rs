@@ -93,6 +93,16 @@ pub async fn import_profile(url: std::string::String, option: Option<PrfOption>)
         handle::Handle::notify_profile_changed(uid);
     }
 
+    let outcome = feat::enhance_profiles()
+        .await
+        .with_error_code("PROFILE_IMPORT_FAILED")?;
+    if !outcome.is_valid() {
+        return Err(coded_error(
+            "PROFILE_IMPORT_FAILED",
+            format!("订阅已保存，但聚合未应用：{outcome}"),
+        ));
+    }
+    handle::Handle::refresh_clash();
     Ok(())
 }
 
@@ -130,6 +140,16 @@ pub async fn create_profile(item: ProfileCreate, file_data: Option<std::string::
                 .await
                 .with_error_code("PROFILE_CREATE_FAILED")?;
             logging_error!(Type::Timer, Timer::global().refresh().await);
+            let outcome = feat::enhance_profiles()
+                .await
+                .with_error_code("PROFILE_CREATE_FAILED")?;
+            if !outcome.is_valid() {
+                return Err(coded_error(
+                    "PROFILE_CREATE_FAILED",
+                    format!("订阅已保存，但聚合未应用：{outcome}"),
+                ));
+            }
+            handle::Handle::refresh_clash();
             Ok(())
         }
         Err(err) => Err(coded_error("PROFILE_CREATE_FAILED", err)),
@@ -159,7 +179,11 @@ pub async fn delete_profile(index: std::string::String) -> CmdResult {
     let result = profiles
         .with_data_modify(|mut candidate| async move {
             let original = candidate.clone();
+            let aggregate_source = candidate
+                .get_item(&index)
+                .is_ok_and(|item| matches!(item.itype.as_deref(), Some("remote" | "local")));
             let (should_update, plan) = candidate.plan_delete_item(&index)?;
+            let should_update = should_update || aggregate_source;
             let guard = if should_update {
                 match CoreManager::global()
                     .update_config_forced_with_profiles(&candidate, &original)

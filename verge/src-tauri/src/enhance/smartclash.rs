@@ -4,10 +4,14 @@ use serde_yaml_ng::{Mapping, Value};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub async fn aggregate(config: &mut Mapping, profiles: &IProfiles, settings: &Settings) -> Result<()> {
-    if !settings.enabled || settings.source_profiles.is_empty() {
-        return Ok(());
-    }
+fn aggregate_sources(profiles: &IProfiles) -> impl Iterator<Item = &crate::config::PrfItem> {
+    profiles.items.as_ref().into_iter().flatten().filter(|item| {
+        matches!(item.itype.as_deref(), Some("remote" | "local")) && item.uid.as_ref() != profiles.current.as_ref()
+    })
+}
+
+pub async fn aggregate(config: &mut Mapping, profiles: &IProfiles, _settings: &Settings) -> Result<()> {
+    // 来源在每次生成时动态读取，新增订阅无需手工加入固定 UID 列表。
     let mut nodes = config
         .get("proxies")
         .and_then(Value::as_sequence)
@@ -17,23 +21,20 @@ pub async fn aggregate(config: &mut Mapping, profiles: &IProfiles, settings: &Se
         .iter()
         .filter_map(|node| node.get("name").and_then(Value::as_str).map(str::to_owned))
         .collect();
-    let mut seen: HashSet<String> = nodes.iter().map(fingerprint).collect::<Result<_>>()?;
-    for uid in &settings.source_profiles {
-        if profiles.current.as_ref().is_some_and(|current| current.as_str() == uid) {
-            continue;
-        }
-        let item = profiles
-            .items
-            .as_ref()
+    // Proxy and group names share Mihomo's namespace, including our generated group.
+    names.insert("ALL-SUBSCRIPTIONS".to_owned());
+    names.extend(
+        config
+            .get("proxy-groups")
+            .and_then(Value::as_sequence)
             .into_iter()
             .flatten()
-            .find(|item| item.uid.as_ref().is_some_and(|id| id.as_str() == uid))
-            .context("聚合订阅已被删除，请重新选择来源")?;
-        ensure!(
-            matches!(item.itype.as_deref(), Some("remote" | "local")),
-            "只能聚合远程或本地订阅"
-        );
+            .filter_map(|group| group.get("name").and_then(Value::as_str).map(str::to_owned)),
+    );
+    let mut seen: HashSet<String> = nodes.iter().map(fingerprint).collect::<Result<_>>()?;
+    for item in aggregate_sources(profiles) {
         let source: Mapping = serde_yaml_ng::from_str(&item.read_file().await?).context("无法解析聚合订阅缓存")?;
+        merge_providers(config, &source, item.uid.as_deref().context("聚合订阅缺少 UID")?)?;
         append(
             &mut nodes,
             &mut names,
@@ -44,7 +45,83 @@ pub async fn aggregate(config: &mut Mapping, profiles: &IProfiles, settings: &Se
                 .map_or(&[], Vec::as_slice),
         )?;
     }
+    let choices: Vec<Value> = nodes.iter().filter_map(|node| node.get("name").cloned()).collect();
+    let providers: Vec<Value> = config
+        .get("proxy-providers")
+        .and_then(Value::as_mapping)
+        .into_iter()
+        .flat_map(|items| items.keys().cloned())
+        .collect();
+    let mut groups = config
+        .get("proxy-groups")
+        .and_then(Value::as_sequence)
+        .cloned()
+        .unwrap_or_default();
+    ensure!(
+        !groups
+            .iter()
+            .any(|group| group.get("name").and_then(Value::as_str) == Some("ALL-SUBSCRIPTIONS")),
+        "订阅占用了全量聚合组名称 ALL-SUBSCRIPTIONS"
+    );
+    if !choices.is_empty() || !providers.is_empty() {
+        for group in &mut groups {
+            if group.get("type").and_then(Value::as_str) == Some("select") {
+                if let Some(Value::Sequence(choices)) = group.get_mut("proxies") {
+                    choices.push("ALL-SUBSCRIPTIONS".into());
+                }
+            }
+        }
+        groups.push(serde_yaml_ng::to_value(serde_json::json!({
+            "name": "ALL-SUBSCRIPTIONS", "type": "select", "proxies": choices, "use": providers
+        }))?);
+    }
+    config.insert("proxy-groups".into(), groups.into());
     config.insert("proxies".into(), nodes.into());
+    Ok(())
+}
+
+fn merge_providers(config: &mut Mapping, source: &Mapping, uid: &str) -> Result<()> {
+    let mut providers = config
+        .get("proxy-providers")
+        .and_then(Value::as_mapping)
+        .cloned()
+        .unwrap_or_default();
+    for (name, provider) in source
+        .get("proxy-providers")
+        .and_then(Value::as_mapping)
+        .into_iter()
+        .flatten()
+    {
+        let name = name.as_str().context("provider 名称无效")?;
+        let mut provider = provider.as_mapping().cloned().context("provider 配置无效")?;
+        if provider.get("type").and_then(Value::as_str) == Some("http") {
+            let digest = Sha256::digest(format!("{uid}:{name}").as_bytes());
+            let id: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            provider.insert("path".into(), format!("./providers/smartclash-{id}.yaml").into());
+        } else if let Some(path) = provider.get("path").and_then(Value::as_str) {
+            let path = std::path::Path::new(path);
+            if path.is_relative() {
+                provider.insert(
+                    "path".into(),
+                    crate::utils::dirs::app_home_dir()?
+                        .join(path)
+                        .to_string_lossy()
+                        .into_owned()
+                        .into(),
+                );
+            }
+        }
+        ensure!(
+            provider
+                .get("proxy")
+                .is_none_or(|proxy| proxy.as_str() == Some("DIRECT")),
+            "聚合 provider 引用了来源策略组，请移除 provider.proxy 后重试"
+        );
+        providers.insert(format!("{uid}::{name}").into(), provider.into());
+    }
+    if !providers.is_empty() {
+        config.insert("proxy-providers".into(), providers.into());
+    }
     Ok(())
 }
 
@@ -153,6 +230,57 @@ pub fn rules(config: &mut Mapping) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_subscriptions_join_without_a_saved_source_selection() -> Result<()> {
+        let mut profiles: IProfiles = serde_yaml_ng::from_str(
+            "current: first\nitems: [{uid: first, type: remote}, {uid: second, type: local}, {uid: script, type: script}]",
+        )?;
+        assert_eq!(aggregate_sources(&profiles).count(), 1);
+        profiles
+            .items
+            .as_mut()
+            .unwrap()
+            .push(serde_yaml_ng::from_str("{uid: third, type: remote}")?);
+        assert_eq!(aggregate_sources(&profiles).count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregation_is_available_without_smart_routing() -> Result<()> {
+        let mut config: Mapping =
+            serde_yaml_ng::from_str("proxies: [{name: fixture, type: ss, server: 192.0.2.1}]\nproxy-groups: []")?;
+        aggregate(&mut config, &IProfiles::default(), &Settings::default()).await?;
+        assert_eq!(config["proxy-groups"][0]["name"].as_str(), Some("ALL-SUBSCRIPTIONS"));
+        assert_eq!(config["proxy-groups"][0]["proxies"][0].as_str(), Some("fixture"));
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_namespaces_provider_names_and_cache_paths() -> Result<()> {
+        let source: Mapping = serde_yaml_ng::from_str(
+            "proxy-providers: {airport: {type: http, url: 'https://example.test/nodes', path: ./cache.yaml}}",
+        )?;
+        let mut config = Mapping::new();
+        merge_providers(&mut config, &source, "first")?;
+        merge_providers(&mut config, &source, "second")?;
+        let providers = &config["proxy-providers"];
+        assert_ne!(
+            providers["first::airport"]["path"],
+            providers["second::airport"]["path"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_renames_nodes_that_collide_with_group_names() -> Result<()> {
+        let mut nodes = Vec::new();
+        let source = serde_yaml_ng::from_str::<Vec<Value>>("[{name: ALL-SUBSCRIPTIONS, type: ss, server: 192.0.2.1}]")?;
+        let mut names = HashSet::from(["ALL-SUBSCRIPTIONS".into()]);
+        append(&mut nodes, &mut names, &mut HashSet::new(), &source)?;
+        assert_ne!(nodes[0]["name"].as_str(), Some("ALL-SUBSCRIPTIONS"));
+        Ok(())
+    }
+
     #[test]
     fn aggregate_keeps_collisions_distinct_and_rewrites_chain_references() -> Result<()> {
         let mut nodes: Vec<Value> =

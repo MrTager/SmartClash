@@ -212,8 +212,10 @@ pub async fn update_profile(uid: &String, option: Option<&PrfOption>, is_mannual
     };
     let profiles = Config::profiles().await;
     let is_current = profiles.latest_arc().current.as_ref() == Some(uid);
-    let smartclash = crate::config::smartclash::load().await?;
-    let is_aggregate = smartclash.enabled && smartclash.source_profiles.iter().any(|source| source == uid.as_str());
+    let is_aggregate = profiles
+        .latest_arc()
+        .get_item(uid)
+        .is_ok_and(|item| matches!(item.itype.as_deref(), Some("remote" | "local")));
     let should_refresh = is_current || is_aggregate || (!profile_persisted && is_mannual_trigger);
 
     if should_refresh {

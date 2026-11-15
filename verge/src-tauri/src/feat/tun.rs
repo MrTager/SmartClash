@@ -22,7 +22,8 @@ pub async fn reconcile_startup_tun_availability() {
     // Read fresh state after prior config writes complete.
     let _config_write = Config::lock_config_write().await;
     let tun_enabled = Config::verge().await.data_arc().enable_tun_mode.unwrap_or(false);
-    if !RUN_STATE.state().startup_tun_should_be_disabled(tun_enabled) {
+    // macOS 缺少服务时等待用户安装，不静默清除已保存的 TUN 要求。
+    if cfg!(target_os = "macos") || !RUN_STATE.state().startup_tun_should_be_disabled(tun_enabled) {
         return;
     }
 

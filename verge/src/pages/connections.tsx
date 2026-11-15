@@ -71,6 +71,10 @@ const ORDER_OPTIONS = [
 
 type OrderKey = (typeof ORDER_OPTIONS)[number]['id']
 
+type NetworkFilter = 'all' | 'tcp' | 'udp'
+
+let savedNetworkFilter: NetworkFilter = 'all'
+
 const orderFunctionMap = ORDER_OPTIONS.reduce<Record<OrderKey, OrderFunc>>(
   (acc, option) => {
     acc[option.id] = option.fn
@@ -88,6 +92,9 @@ const ConnectionsPage = () => {
   )
   const [hasSearch, setHasSearch] = useState(false)
   const [curOrderOpt, setCurOrderOpt] = useState<OrderKey>('default')
+  const [networkFilter, setNetworkFilter] =
+    useState<NetworkFilter>(savedNetworkFilter)
+  const hasFilter = networkFilter !== 'all'
   const [connectionsType, setConnectionsType] = useState<'active' | 'closed'>(
     'active',
   )
@@ -114,18 +121,30 @@ const ConnectionsPage = () => {
   const filterConn = useMemo(() => {
     const orderFunc = orderFunctionMap[curOrderOpt]
 
-    if (isTableLayout && !hasSearch) return selectedConnections
-    if (!hasSearch) return orderFunc([...selectedConnections])
+    if (isTableLayout && !hasSearch && !hasFilter) return selectedConnections
+    if (!hasSearch && !hasFilter) return orderFunc([...selectedConnections])
 
     const matchConns = selectedConnections.filter((conn) => {
-      const { host, destinationIP, process } = conn.metadata
+      const { host, destinationIP, process, network } = conn.metadata
+      if (networkFilter !== 'all' && network !== networkFilter) return false
       return (
-        match(host || '') || match(destinationIP || '') || match(process || '')
+        !hasSearch ||
+        match(host || '') ||
+        match(destinationIP || '') ||
+        match(process || '')
       )
     })
 
     return orderFunc ? orderFunc(matchConns) : matchConns
-  }, [selectedConnections, isTableLayout, hasSearch, match, curOrderOpt])
+  }, [
+    selectedConnections,
+    isTableLayout,
+    hasSearch,
+    hasFilter,
+    networkFilter,
+    match,
+    curOrderOpt,
+  ])
 
   const displayRows = useConnectionRowViews(
     isTableLayout ? EMPTY_CONNECTIONS : filterConn,
@@ -264,6 +283,24 @@ const ConnectionsPage = () => {
             ))}
           </BaseStyledSelect>
         )}
+        <BaseStyledSelect
+          style={{ width: 80 }}
+          value={networkFilter}
+          onChange={(e) => {
+            savedNetworkFilter = e.target.value as NetworkFilter
+            setNetworkFilter(savedNetworkFilter)
+          }}
+        >
+          <MenuItem value="all">
+            <span style={{ fontSize: 14 }}>All</span>
+          </MenuItem>
+          <MenuItem value="tcp">
+            <span style={{ fontSize: 14 }}>TCP</span>
+          </MenuItem>
+          <MenuItem value="udp">
+            <span style={{ fontSize: 14 }}>UDP</span>
+          </MenuItem>
+        </BaseStyledSelect>
         <Box
           sx={{
             flex: 1,

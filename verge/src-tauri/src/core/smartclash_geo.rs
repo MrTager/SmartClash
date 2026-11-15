@@ -72,6 +72,17 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Mihomo alpha leaves `destinationIP` empty in normal DNS mode; `remoteDestination`
+/// keeps the resolved target in that case.
+fn destination_ip(connection: &tauri_plugin_mihomo::models::Connection) -> String {
+    let metadata = &connection.metadata;
+    if metadata.destination_ip.is_empty() {
+        metadata.remote_destination.clone()
+    } else {
+        metadata.destination_ip.clone()
+    }
+}
+
 fn cached(host: &str) -> Option<Location> {
     CACHE
         .lock()
@@ -201,7 +212,7 @@ pub async fn snapshot() -> MapSnapshot {
     let mut hosts: Vec<String> = connections
         .iter()
         .take(64)
-        .map(|connection| connection.metadata.destination_ip.clone())
+        .map(|connection| destination_ip(connection))
         .filter(|ip| ip.parse::<IpAddr>().is_ok_and(public_ip))
         .collect();
     hosts.extend(servers.values().cloned());
@@ -226,7 +237,7 @@ pub async fn snapshot() -> MapSnapshot {
             .iter()
             .filter_map(|name| servers.get(name).and_then(|server| cached(server)))
             .collect();
-        let destination = cached(&connection.metadata.destination_ip);
+        let destination = cached(&destination_ip(connection));
         if chain.is_empty() || locations.len() != chain.len() || destination.is_none() {
             result.unmapped += 1;
             continue;

@@ -235,7 +235,9 @@ impl CoreManager {
                 Ok(_) => {
                     if crate::APP_HANDLE.get().is_some() {
                         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                            runtime.spawn(async { let _ = crate::core::smartclash::get().await; });
+                            runtime.spawn(async {
+                                let _ = crate::core::smartclash::get().await;
+                            });
                         }
                     }
                     return next;

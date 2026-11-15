@@ -74,7 +74,7 @@ export function NetworkGlobe({
       context.lineWidth = thickness
       context.stroke()
     }
-    const dot = (point: GlobePoint, color: string, size: number) => {
+    const dot = (point: GlobePoint, color: string) => {
       const rotated = rotatePoint(point, { yaw, pitch })
       if (isOccluded(rotated)) return
       const screen = projectPoint(
@@ -84,12 +84,9 @@ export function NetworkGlobe({
         height / 2,
       )
       context.beginPath()
-      context.arc(screen.x, screen.y, size, 0, Math.PI * 2)
+      context.arc(screen.x, screen.y, 2.5, 0, Math.PI * 2)
       context.fillStyle = color
-      context.shadowColor = color
-      context.shadowBlur = 12
       context.fill()
-      context.shadowBlur = 0
     }
     const draw = () => {
       if (!width || !height) return
@@ -144,18 +141,15 @@ export function NetworkGlobe({
                 Math.floor(((phase * 0.3 + i * 0.17) % 1) * (arc.length - 1))
               ],
               highlight ? '#ffe0a9' : '#90fff0',
-              2.4,
             )
         }
-        if (points.length)
-          dot(points[points.length - 1], '#ffb864', highlight ? 4 : 2.5)
+        if (points.length) dot(points[points.length - 1], '#ffb864')
       }
       data.nodes.forEach((node) => {
         if (node.location.latitude !== null && node.location.longitude !== null)
           dot(
             geographicPoint(node.location.latitude, node.location.longitude),
             '#70f4e1',
-            3,
           )
       })
     }

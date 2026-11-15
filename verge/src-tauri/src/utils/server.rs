@@ -232,12 +232,23 @@ fn start_embedded_server(listener: tokio::net::TcpListener, token: String) {
             Ok::<_, warp::Rejection>(warp::reply::with_status("ok".to_string(), warp::http::StatusCode::OK))
         });
 
-    let subscription = warp::path!("smartclash" / "subscription" / String).and(warp::get())
+    let subscription = warp::path!("smartclash" / "subscription" / String)
+        .and(warp::get())
         .and_then(|provided: String| async move {
-            let expected = crate::core::smartclash_export::token().await.map_err(|_| warp::reject())?;
-            if provided != expected { return Err(warp::reject::not_found()); }
-            let yaml = crate::core::smartclash_export::export().await.map_err(|_| warp::reject())?;
-            Ok::<_, warp::Rejection>(warp::reply::with_header(yaml, "Content-Type", "application/yaml; charset=utf-8"))
+            let expected = crate::core::smartclash_export::token()
+                .await
+                .map_err(|_| warp::reject())?;
+            if provided != expected {
+                return Err(warp::reject::not_found());
+            }
+            let yaml = crate::core::smartclash_export::export()
+                .await
+                .map_err(|_| warp::reject())?;
+            Ok::<_, warp::Rejection>(warp::reply::with_header(
+                yaml,
+                "Content-Type",
+                "application/yaml; charset=utf-8",
+            ))
         });
     let commands = auth.clone().and(visible).or(auth.and(scheme)).or(pac).or(subscription);
     AsyncHandler::spawn(move || async move {

@@ -17,6 +17,7 @@ import { useState } from 'react'
 
 import { useProfiles } from '@/hooks/use-profiles'
 import { useSmartClash } from '@/hooks/use-smartclash'
+import { useProxiesData } from '@/providers/app-data-context'
 import {
   getSmartClashMap,
   getSmartClashNodes,
@@ -48,6 +49,7 @@ const statuses: Record<string, string> = {
 export function SmartClashPanel() {
   const { data, error, patch, optimize } = useSmartClash()
   const { profiles } = useProfiles()
+  const { proxyView } = useProxiesData()
   const sourceOptions = (profiles?.items ?? []).filter(
     (item) => item.uid && (item.type === 'remote' || item.type === 'local'),
   )
@@ -82,6 +84,27 @@ export function SmartClashPanel() {
       /* The mutation service owns error notices. */
     }
   }
+  const smartGroup = proxyView?.groups.find(
+    (group) => group.name === 'SMARTCLASH',
+  )
+  const aggregateGroup = proxyView?.groups.find(
+    (group) => group.name === 'ALL-SUBSCRIPTIONS',
+  )
+  const smartNow = smartGroup?.now ?? data?.selected ?? null
+  const rulesActive = (data?.settings.enabled ?? false) && (data?.settings.smartRules ?? false)
+  const effectiveRoute = !data?.settings.enabled
+    ? '智能选路未启用，流量按订阅原有规则分流。'
+    : rulesActive
+      ? `规则（国内直连，其余走智能）→ SMARTCLASH → ${smartNow ?? '检测中…'}`
+      : '按订阅原有规则分流；仅当业务组手动选择 SMARTCLASH 时走智能链路。'
+  const idlePicked = aggregateGroup?.now
+  const idleHint =
+    rulesActive &&
+    idlePicked &&
+    idlePicked !== 'SMARTCLASH' &&
+    idlePicked !== smartNow
+      ? `聚合组 ALL-SUBSCRIPTIONS 当前手动选中「${idlePicked}」，它不在任何规则的路径上，不承载流量。要让它跟随智能链路，请在「代理」页 ALL-SUBSCRIPTIONS 组里选择 SMARTCLASH。`
+      : null
   return (
     <Paper
       variant="outlined"
@@ -155,6 +178,37 @@ export function SmartClashPanel() {
           </Typography>
         </Box>
         <Stack spacing={1.5} sx={{ minWidth: 0 }}>
+          <Box
+            sx={{
+              p: 1.25,
+              borderRadius: 2,
+              bgcolor: rulesActive ? 'success.main' : 'action.hover',
+              color: rulesActive ? 'success.contrastText' : 'text.primary',
+            }}
+          >
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <Box
+                component="span"
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  bgcolor: rulesActive
+                    ? 'success.light'
+                    : 'text.disabled',
+                }}
+              />
+              <Typography sx={{ fontWeight: 700 }}>生效链路</Typography>
+            </Stack>
+            <Typography variant="body2" sx={{ mt: 0.5 }}>
+              {effectiveRoute}
+            </Typography>
+            {idleHint && (
+              <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
+                {idleHint}
+              </Typography>
+            )}
+          </Box>
           <FormControlLabel
             control={
               <Switch
@@ -228,15 +282,8 @@ export function SmartClashPanel() {
             label="地球动画"
           />
           <Typography variant="caption" color="text.secondary">
-            在「代理」中将业务策略组选择为
-            SMARTCLASH，智能线路才会用于该组流量。原有系统代理、TUN、订阅和规则由
-            Clash Verge Rev 管理。
-          </Typography>
-          <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
-            当前智能链路：
-            {data?.chain.length
-              ? data.chain.join(' → ')
-              : (data?.selected ?? '尚未选择')}
+            规则只把流量交给它匹配到的组：启用国内直连规则后，非国内流量统一走
+            SMARTCLASH 组（即上方生效链路）。其它组的节点选择不影响流量，除非某条规则引用了该组。
           </Typography>
           <Button
             variant="contained"
@@ -257,19 +304,16 @@ export function SmartClashPanel() {
             options={sourceOptions.flatMap((item) =>
               item.uid ? [item.uid] : [],
             )}
-            value={data.settings.sourceProfiles ?? []}
+            value={sourceOptions.flatMap((item) => item.uid ? [item.uid] : [])}
             getOptionLabel={(uid) =>
               sourceOptions.find((item) => item.uid === uid)?.name ?? uid
             }
-            disabled={pending}
-            onChange={(_, sourceProfiles) => {
-              void save({ sourceProfiles })
-            }}
+            readOnly
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="附加订阅来源"
-                helperText="与当前订阅聚合节点并去重；订阅更新沿用原有管理页面。"
+                label="全部订阅来源（自动聚合）"
+                helperText="所有远程和本地订阅自动纳入 ALL-SUBSCRIPTIONS；新增、更新后重载。当前订阅仅决定基础规则，订阅管理保持不变。"
                 size="small"
               />
             )}

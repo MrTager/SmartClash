@@ -11,7 +11,6 @@ import { useEffect, useRef, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
 // test icons
-import apple from '@/assets/image/test/apple.svg?raw'
 import github from '@/assets/image/test/github.svg?raw'
 import google from '@/assets/image/test/google.svg?raw'
 import youtube from '@/assets/image/test/youtube.svg?raw'
@@ -22,6 +21,7 @@ import { useVerge } from '@/hooks/use-verge'
 import { emitTestAll } from '@/services/bus'
 
 import { EnhancedCard } from './enhanced-card'
+import { migrateDefaultTests, openai } from './test-defaults'
 
 // 自定义滚动条样式
 const ScrollBox = styled(Box)(({ theme }) => ({
@@ -41,9 +41,9 @@ const ScrollBox = styled(Box)(({ theme }) => ({
 const DEFAULT_TEST_LIST = [
   {
     uid: nanoid(),
-    name: 'Apple',
-    url: 'https://www.apple.com',
-    icon: apple,
+    name: 'OpenAI',
+    url: 'https://api.openai.com/v1/models',
+    icon: openai,
   },
   {
     uid: nanoid(),
@@ -147,7 +147,12 @@ export const TestCard = () => {
   // 仅在verge首次加载时初始化测试列表
   useEffect(() => {
     if (verge && !verge.test_list) {
-      patchVerge({ test_list: DEFAULT_TEST_LIST })
+      void patchVerge({ test_list: DEFAULT_TEST_LIST })
+    } else if (verge?.test_list) {
+      const migrated = migrateDefaultTests(verge.test_list)
+      if (migrated.some((item, index) => item !== verge.test_list![index])) {
+        void patchVerge({ test_list: migrated })
+      }
     }
   }, [verge, patchVerge])
 

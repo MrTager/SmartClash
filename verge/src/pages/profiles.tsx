@@ -16,7 +16,7 @@ import {
   RefreshRounded,
   TextSnippetOutlined,
 } from '@mui/icons-material'
-import { Box, Button, Divider, Grid, IconButton, Stack } from '@mui/material'
+import { Alert, Box, Button, Divider, Grid, IconButton, Stack } from '@mui/material'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { readText } from '@tauri-apps/plugin-clipboard-manager'
 import { readTextFile } from '@tauri-apps/plugin-fs'
@@ -884,6 +884,9 @@ const ProfilePage = () => {
           overflowY: 'auto',
         }}
       >
+        <Alert severity="info" sx={{ mb: 1.5 }}>
+          全部订阅节点自动聚合到代理页的 ALL-SUBSCRIPTIONS，新增订阅自动纳入。下方选中项仅作为基础规则与配置来源，不会排除其他订阅节点；原有订阅更新、编辑和删除功能保持不变。
+        </Alert>
         <DragDropProvider
           key={profileDndRevision}
           sensors={[profilePointerSensor, KeyboardSensor]}
