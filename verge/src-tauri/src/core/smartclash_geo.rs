@@ -91,6 +91,18 @@ fn cached(host: &str) -> Option<Location> {
         .and_then(|entry| entry.location.clone())
 }
 
+/// 连线涉及的主机是否仍在后台解析中 (缓存里还没有条目)。
+/// 已有条目但定位失败 (= 解析过且失败) 才视为真正无法定位。
+fn is_pending(destination_host: &str, chain: &[String], servers: &HashMap<String, String>) -> bool {
+    fn unknown(host: &str) -> bool {
+        !CACHE.lock().contains_key(host)
+    }
+    unknown(destination_host)
+        || chain
+            .iter()
+            .any(|name| servers.get(name).is_some_and(|server| unknown(server)))
+}
+
 async fn locate(client: &reqwest::Client, host: &str) -> Option<Location> {
     let ip = match host.parse::<IpAddr>() {
         Ok(ip) if public_ip(ip) => ip,
@@ -132,7 +144,7 @@ async fn locate(client: &reqwest::Client, host: &str) -> Option<Location> {
     })
 }
 
-fn resolve_missing(hosts: Vec<String>) {
+fn resolve_missing(mut hosts: Vec<String>) {
     if RESOLVING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -152,6 +164,9 @@ fn resolve_missing(hosts: Vec<String>) {
         else {
             return;
         };
+        // 去重: servers 与连接目标常重复, 重复项白白消耗每轮 4 个的解析额度
+        let mut seen = std::collections::HashSet::new();
+        hosts.retain(|host| seen.insert(host.clone()));
         let mut count = 0;
         for host in hosts {
             let fresh = CACHE.lock().get(&host).is_some_and(|entry| {
@@ -173,7 +188,7 @@ fn resolve_missing(hosts: Vec<String>) {
                 },
             );
             count += 1;
-            if count == 4 || Handle::global().is_exiting() {
+            if count == 8 || Handle::global().is_exiting() {
                 break;
             }
         }
@@ -215,6 +230,8 @@ pub async fn snapshot() -> MapSnapshot {
         .map(|connection| destination_ip(connection))
         .filter(|ip| ip.parse::<IpAddr>().is_ok_and(public_ip))
         .collect();
+    // 节点服务器优先: 它们决定节点/连线的可绘制性, 每轮解析额度有限,
+    // 排在连接目标前面避免被大量一次性 destination 饿死
     hosts.extend(servers.values().cloned());
     let mut result = MapSnapshot::default();
     for (name, server) in &servers {
@@ -237,8 +254,14 @@ pub async fn snapshot() -> MapSnapshot {
             .iter()
             .filter_map(|name| servers.get(name).and_then(|server| cached(server)))
             .collect();
-        let destination = cached(&destination_ip(connection));
+        let destination_host = destination_ip(connection);
+        let destination = cached(&destination_host);
         if chain.is_empty() || locations.len() != chain.len() || destination.is_none() {
+            // 尚在后台解析中的目标只是"还没就绪", 不算定位失败,
+            // 否则首轮快照会出现大片虚假 unmapped (地球看起来没数据)
+            if is_pending(&destination_host, &chain, &servers) {
+                continue;
+            }
             result.unmapped += 1;
             continue;
         }
@@ -259,6 +282,7 @@ pub async fn snapshot() -> MapSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn location_service_never_receives_private_or_fake_addresses() {
         for ip in [
@@ -280,5 +304,67 @@ mod tests {
         for ip in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             assert!(public_ip(ip.parse().unwrap()));
         }
+    }
+
+    #[test]
+    fn pending_hosts_are_not_counted_as_unmapped() {
+        CACHE.lock().clear();
+        let servers: HashMap<String, String> = [
+            ("节点A".to_owned(), "a.example.com".to_owned()),
+            ("节点B".to_owned(), "b.example.com".to_owned()),
+        ]
+        .into();
+        // destination 与入口节点尚未解析 → pending; 出口节点已解析失败 (有条目) → 不是 pending
+        CACHE.lock().insert(
+            "b.example.com".to_owned(),
+            Entry {
+                location: None,
+                checked: Instant::now(),
+            },
+        );
+        // 目标未解析 → pending (即使另一个节点已失败)
+        assert!(is_pending("8.8.8.8", &["节点A".to_owned()], &servers));
+        CACHE.lock().clear();
+    }
+
+    #[test]
+    fn failed_lookups_are_unmapped_but_pending_ones_are_skipped() {
+        CACHE.lock().clear();
+        let servers: HashMap<String, String> =
+            [("节点A".to_owned(), "a.example.com".to_owned())].into();
+        let chain = ["节点A".to_owned()];
+
+        // 全部未解析 → pending, 不应计入 unmapped
+        assert!(is_pending("8.8.8.8", &chain, &servers));
+
+        // 已解析但失败 (缓存有条目、location 为 None) → 真 unmapped
+        CACHE.lock().insert(
+            "a.example.com".to_owned(),
+            Entry {
+                location: None,
+                checked: Instant::now(),
+            },
+        );
+        CACHE.lock().insert(
+            "8.8.8.8".to_owned(),
+            Entry {
+                location: None,
+                checked: Instant::now(),
+            },
+        );
+        assert!(!is_pending("8.8.8.8", &chain, &servers));
+        CACHE.lock().clear();
+    }
+
+    #[test]
+    fn resolve_queue_deduplicates_hosts() {
+        // 模拟 snapshot 构造的 hosts: 连接目标 + servers 大量重复
+        let mut hosts = vec!["1.1.1.1".to_owned(); 3];
+        hosts.push("a.example.com".to_owned());
+        hosts.push("1.1.1.1".to_owned());
+        hosts.push("a.example.com".to_owned());
+        let mut seen = std::collections::HashSet::new();
+        hosts.retain(|host| seen.insert(host.clone()));
+        assert_eq!(hosts, vec!["1.1.1.1".to_owned(), "a.example.com".to_owned()]);
     }
 }
