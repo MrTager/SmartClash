@@ -29,8 +29,13 @@ automatically; import them on the Profiles page.
   one. Automatic switches have a 30 second cooldown. Each round has a 45 second
   budget, with up to three isolated probes at once. High speed background checks
   use HTTPS only; bandwidth downloads require explicit optimization.
-- Manual selection disables automatic selection. Explicit optimization still
-  works with automatic selection disabled. Runtime generation and source
+- Manual selection pauses automatic failover only for the current session; it
+  does not rewrite the saved automatic preference, so restarting the app resumes
+  automatic failover. Explicit optimization still works while paused, and
+  pressing "restore automatic routing" resumes automatic selection. When the
+  active route is confirmed faulty but no measured candidate is confirmed
+  reachable, failover relaxes to the best reachable (HTTPS-verified) candidate
+  rather than staying on a dead route. Runtime generation and source
   configuration are checked before applying a measured candidate.
 - Select up to 64 additional cached profiles to aggregate inline nodes. Node
   identities exclude display names; name collisions get fingerprint suffixes.

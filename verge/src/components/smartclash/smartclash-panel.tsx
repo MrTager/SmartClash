@@ -292,8 +292,17 @@ export function SmartClashPanel() {
               void run()
             }}
           >
-            {data?.busy ? '正在验证线路…' : '按此模式重新选路'}
+            {data?.busy
+              ? '正在验证线路…'
+              : data?.status === 'manual'
+                ? '恢复自动选路'
+                : '按此模式重新选路'}
           </Button>
+          {data?.status === 'manual' && (
+            <Typography variant="caption" color="text.secondary">
+              当前保留手动选择的节点，已暂停自动切换；点上方按钮立即恢复自动，或重启应用后自动恢复。
+            </Typography>
+          )}
         </Stack>
       </Box>
       {data && (

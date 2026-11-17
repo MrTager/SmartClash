@@ -293,20 +293,15 @@ pub async fn manual_selection(group: &str, node: &str) -> Result<()> {
     }
     initialize().await?;
     let _operation = OPERATIONS.lock().await;
-    let settings = {
-        let mut state = STATE.lock();
-        supersede(&mut state);
-        state.manual = true;
-        state.snapshot.settings.automatic = false;
-        state.snapshot.selected = Some(node.to_owned());
-        state.snapshot.chain = vec![node.to_owned()];
-        state.snapshot.status = "manual".into();
-        state.snapshot.settings.clone()
-    };
-    if let Err(error) = smartclash::save(&settings).await {
-        fail(format!("手动选择已保留，但无法保存自动选择关闭状态：{error:#}"));
-        return Err(error);
-    }
+    let mut state = STATE.lock();
+    supersede(&mut state);
+    // 手动选择只在本会话暂停自动切换，不改写存盘的 automatic：
+    // 避免「曾经手动点过一次节点 → 自动切换被永久关闭且无人记得」导致断线后不切换。
+    // 恢复自动：重启应用，或在面板点「恢复自动选路」（optimize 会退出手动状态）。
+    state.manual = true;
+    state.snapshot.selected = Some(node.to_owned());
+    state.snapshot.chain = vec![node.to_owned()];
+    state.snapshot.status = "manual".into();
     Ok(())
 }
 
@@ -317,6 +312,13 @@ pub async fn optimize() -> Snapshot {
     let result = run(true).await;
     if let Err(error) = result {
         return fail(error);
+    }
+    // 用户主动触发重新选路，视为放弃手动保留，恢复自动维护。
+    {
+        let mut state = STATE.lock();
+        if state.snapshot.settings.automatic {
+            state.manual = false;
+        }
     }
     ensure_monitor();
     STATE.lock().snapshot.clone()
@@ -331,6 +333,15 @@ fn allowed(state: &State, generation: u64) -> bool {
         && state.snapshot.settings.enabled
         && state.snapshot.settings.automatic
         && !state.manual
+}
+
+/// 当前线路是否仍然可用。
+/// AI 模式必须明确探测到可达（Some(true)）才算健康：unknown challenge / 429 /
+/// 非 JSON 响应会让 classify_ai 返回 None，若把它当成健康就会清零失败计数、
+/// 永久保留当前线路，导致 OpenAI 断线后不切换。该语义需与 plan::eligible 一致。
+fn is_healthy(mode: Mode, measurement: &Measurement) -> bool {
+    measurement.latency_ms.is_some()
+        && (mode != Mode::Ai || measurement.ai_reachable == Some(true))
 }
 
 fn ranking<'a>(plan: &'a Plan, samples: &HashMap<String, Sample>, settings: &Settings) -> Vec<&'a Candidate> {
@@ -363,6 +374,33 @@ fn ranking<'a>(plan: &'a Plan, samples: &HashMap<String, Sample>, settings: &Set
                     l.latency_ms.cmp(&r.latency_ms)
                 }
             })
+    });
+    candidates
+}
+
+/// 兜底选路：只要求候选探测到出网（HTTPS 204 通过、即 latency_ms 有值），
+/// 不要求 AI 可达性确认。用于当前线路已确认故障、但严格准入（ranking）
+/// 没有任何「确认可用」备用的场景，避免卡在完全断线的节点上。
+fn relaxed_ranking<'a>(
+    plan: &'a Plan,
+    samples: &HashMap<String, Sample>,
+    settings: &Settings,
+) -> Vec<&'a Candidate> {
+    let mut candidates: Vec<_> = plan
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            samples.get(&candidate.name).is_some_and(|sample| {
+                sample.checked.elapsed() <= FRESH && sample.measurement.latency_ms.is_some()
+            })
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        let l = &samples[&left.name].measurement;
+        let r = &samples[&right.name].measurement;
+        (settings.prefer_non_hong_kong && left.hong_kong)
+            .cmp(&(settings.prefer_non_hong_kong && right.hong_kong))
+            .then_with(|| l.latency_ms.cmp(&r.latency_ms))
     });
     candidates
 }
@@ -542,10 +580,7 @@ async fn run(explicit: bool) -> Result<()> {
                 .as_ref()
                 .and_then(|name| state.samples.get(name))
                 .filter(|sample| sample.checked.elapsed() <= FRESH)
-                .map(|sample| {
-                    sample.measurement.latency_ms.is_some()
-                        && (settings.mode != Mode::Ai || sample.measurement.ai_reachable != Some(false))
-                });
+                .map(|sample| is_healthy(settings.mode, &sample.measurement));
             if healthy == Some(true) {
                 state.failures = 0;
             } else if healthy == Some(false) {
@@ -573,9 +608,21 @@ async fn run(explicit: bool) -> Result<()> {
                     },
                     ..settings.clone()
                 };
-                ranking(&plan, &state.samples, &ranking_settings)
+                let best = ranking(&plan, &state.samples, &ranking_settings)
                     .first()
-                    .map(|candidate| (*candidate).clone())
+                    .map(|candidate| (*candidate).clone());
+                // 当前线路已确认故障但没有任何「确认可用」的备用时，放宽到
+                // 「至少能出网」的候选，避免一直卡在完全断线的节点上。
+                // 显式优化仍坚持严格准入，不对用户隐瞒候选的真实质量。
+                match best {
+                    Some(best) => Some(best),
+                    None if !explicit && healthy == Some(false) => {
+                        relaxed_ranking(&plan, &state.samples, &ranking_settings)
+                            .first()
+                            .map(|candidate| (*candidate).clone())
+                    }
+                    None => None,
+                }
             };
             ready
         };
@@ -630,9 +677,7 @@ async fn run(explicit: bool) -> Result<()> {
                     .samples
                     .get(&state.snapshot.selected.clone().unwrap_or_default())
                     .is_some_and(|sample| {
-                        sample.checked.elapsed() <= FRESH
-                            && sample.measurement.latency_ms.is_some()
-                            && (settings.mode != Mode::Ai || sample.measurement.ai_reachable == Some(true))
+                        sample.checked.elapsed() <= FRESH && is_healthy(settings.mode, &sample.measurement)
                     }) {
                     "ready"
                 } else {
@@ -679,6 +724,82 @@ mod tests {
         assert!(!allowed(&state, 0));
         state.snapshot.settings.automatic = false;
         assert!(!allowed(&state, 1));
+    }
+
+    #[test]
+    fn ai_health_requires_confirmed_reachability_not_absence_of_failure() {
+        let measure = |latency: Option<u64>, ai: Option<bool>| Measurement {
+            name: "fixture".into(),
+            latency_ms: latency,
+            bytes_per_second: None,
+            ai_reachable: ai,
+        };
+        // The regression: 429 / unknown challenge / non-JSON responses map to None.
+        // Treating None as healthy reset the failure counter and never switched.
+        assert!(!is_healthy(Mode::Ai, &measure(Some(20), None)));
+        assert!(!is_healthy(Mode::Ai, &measure(Some(20), Some(false))));
+        assert!(is_healthy(Mode::Ai, &measure(Some(20), Some(true))));
+        assert!(!is_healthy(Mode::Ai, &measure(None, Some(true))));
+        // Non-AI modes still only need a working HTTPS path.
+        assert!(is_healthy(Mode::LowLatency, &measure(Some(20), None)));
+        assert!(is_healthy(Mode::HighSpeed, &measure(Some(20), None)));
+        assert!(!is_healthy(Mode::LowLatency, &measure(None, None)));
+    }
+
+    #[test]
+    fn relaxed_ranking_accepts_reachable_candidates_when_no_confirmed_backup() {
+        let settings = Settings {
+            enabled: true,
+            mode: Mode::Ai,
+            ..Settings::default()
+        };
+        let plan = Plan {
+            candidates: vec![
+                Candidate {
+                    name: "hk".into(),
+                    chain: vec!["hk".into()],
+                    hong_kong: true,
+                },
+                Candidate {
+                    name: "jp".into(),
+                    chain: vec!["jp".into()],
+                    hong_kong: false,
+                },
+            ],
+            ..Plan::default()
+        };
+        let samples = HashMap::from([
+            (
+                "hk".into(),
+                Sample {
+                    measurement: Measurement {
+                        name: "hk".into(),
+                        latency_ms: Some(5),
+                        bytes_per_second: None,
+                        ai_reachable: None,
+                    },
+                    checked: Instant::now(),
+                },
+            ),
+            (
+                "jp".into(),
+                Sample {
+                    measurement: Measurement {
+                        name: "jp".into(),
+                        latency_ms: Some(90),
+                        bytes_per_second: None,
+                        ai_reachable: Some(false),
+                    },
+                    checked: Instant::now(),
+                },
+            ),
+        ]);
+        // 严格准入：AI 模式下两者都没有确认可达（Some(true)），无候选。
+        assert!(ranking(&plan, &samples, &settings).is_empty());
+        // 兜底准入：只看能否出网，AI 可达性不作要求，仍优先非香港出口。
+        let relaxed = relaxed_ranking(&plan, &samples, &settings);
+        assert_eq!(relaxed.len(), 2);
+        assert_eq!(relaxed[0].name, "jp");
     }
 
     #[test]
