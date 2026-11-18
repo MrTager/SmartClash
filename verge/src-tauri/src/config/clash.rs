@@ -75,7 +75,10 @@ impl IClashTemp {
         map.insert("port".into(), network::ports::DEFAULT_HTTP.into());
         map.insert("log-level".into(), "info".into());
         map.insert("allow-lan".into(), false.into());
-        map.insert("ipv6".into(), true.into());
+        // 默认关闭：多数家庭宽带没有可用的 IPv6 出口，开启后 TUN 会劫持 v6 默认路由并把
+        // AAAA 解析放行给应用，直连流量在无路由的 v6 上全部失败（no route to host）。
+        // 有真实 IPv6 的用户可在设置中手动开启。
+        map.insert("ipv6".into(), false.into());
         map.insert("mode".into(), "rule".into());
         map.insert(
             "external-controller".into(),

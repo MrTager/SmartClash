@@ -257,6 +257,12 @@ async fn owned_service_core_uses_port(port: u16) -> bool {
                 "Current user's service core is active but its mixed proxy port is unavailable: {error:#}; \
                  preserving the selected port until core replacement resolves ownership"
             );
+            // 该服务按安装路径共享：旧版 Clash Verge 等客户端运行时会抢占同一服务内核，
+            // 导致两边互相置换配置、代理时断时续。提醒用户退出旧客户端。
+            Handle::notice(
+                NoticeStatus::Info,
+                "检测到共享服务内核已被其他 Clash 客户端占用（可能是旧版 Clash Verge），两者会互相抢占配置，请退出旧版客户端",
+            );
             true
         }
     }
