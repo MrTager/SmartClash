@@ -33,11 +33,13 @@
         "systemProxyDisabled": "系統代理已關閉，建議大多數使用者開啟此選項",
         "tunModeServiceRequired": "虛擬網路介面卡模式需要服務模式，請先安裝服務",
         "tunModeEnabled": "虛擬網路介面卡模式已啟用，應用程式將透過虛擬網路介面卡存取網路",
-        "tunModeDisabled": "虛擬網路介面卡模式已關閉，適用於特殊應用程式"
+        "tunModeDisabled": "虛擬網路介面卡模式已關閉，適用於特殊應用程式",
+        "bothProxyAndTunEnabled": "System Proxy and TUN Mode are both enabled"
       },
       "tooltips": {
         "systemProxy": "修改作業系統的代理設定，如果開啟失敗，可手動修改作業系統的代理設定",
-        "tunMode": "虛擬網路介面卡模式可以接管所有應用程式流量，適用於不遵循系統代理設定的特殊應用程式"
+        "tunMode": "虛擬網路介面卡模式可以接管所有應用程式流量，適用於不遵循系統代理設定的特殊應用程式",
+        "bothProxyAndTun": "Apps that follow the system proxy enter the core through the proxy port; TUN captures the rest (apps that ignore the system proxy). This is a valid combination and does not need fixing."
       }
     },
     "clashInfo": {

@@ -148,6 +148,9 @@ export const ProxyTunCard: FC = () => {
 
   const { enable_tun_mode } = verge ?? {}
 
+  const tunActive = Boolean(enable_tun_mode) && isTunModeAvailable
+  const bothActive = Boolean(systemProxyIndicator) && tunActive
+
   const handleError = (err: unknown) => {
     showNotice.error(err)
   }
@@ -201,7 +204,7 @@ export const ProxyTunCard: FC = () => {
           onClick={() => handleTabChange('tun')}
           icon={TroubleshootRounded}
           label={t('settings.sections.system.toggles.tunMode')}
-          hasIndicator={enable_tun_mode! && isTunModeAvailable}
+          hasIndicator={tunActive}
         />
       </Stack>
 
@@ -220,6 +223,37 @@ export const ProxyTunCard: FC = () => {
           tooltipTitle={tabDescription.tooltip}
         />
       </Box>
+
+      {bothActive && (
+        <Typography
+          variant="caption"
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 0.5,
+            width: '95%',
+            mx: 'auto',
+            mb: 1,
+            p: 0.6,
+            borderRadius: 1,
+            color: 'text.secondary',
+            border: 1,
+            borderColor: 'divider',
+            backgroundColor: 'background.paper',
+            wordBreak: 'break-word',
+          }}
+        >
+          {t('home.components.proxyTun.status.bothProxyAndTunEnabled')}
+          <Tooltip
+            title={t('home.components.proxyTun.tooltips.bothProxyAndTun')}
+          >
+            <HelpOutlineRounded
+              sx={{ fontSize: 14, opacity: 0.7, flexShrink: 0 }}
+            />
+          </Tooltip>
+        </Typography>
+      )}
 
       <Box
         sx={{

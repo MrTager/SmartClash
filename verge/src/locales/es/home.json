@@ -33,11 +33,13 @@
         "systemProxyDisabled": "El proxy del sistema está deshabilitado. Se recomienda a la mayoría de los usuarios habilitar esta opción.",
         "tunModeServiceRequired": "El modo TUN requiere el modo de servicio. Instale el servicio primero.",
         "tunModeEnabled": "El modo TUN está habilitado. Las aplicaciones accederán a Internet a través de la interfaz virtual.",
-        "tunModeDisabled": "El modo TUN está deshabilitado. Este modo es adecuado para aplicaciones especiales."
+        "tunModeDisabled": "El modo TUN está deshabilitado. Este modo es adecuado para aplicaciones especiales.",
+        "bothProxyAndTunEnabled": "System Proxy and TUN Mode are both enabled"
       },
       "tooltips": {
         "systemProxy": "Modifica la configuración del proxy del sistema operativo. Si no se puede habilitar, puede modificar manualmente la configuración del proxy del sistema operativo.",
-        "tunMode": "El modo TUN puede gestionar todo el tráfico de las aplicaciones. Es adecuado para aplicaciones que no siguen la configuración del proxy del sistema."
+        "tunMode": "El modo TUN puede gestionar todo el tráfico de las aplicaciones. Es adecuado para aplicaciones que no siguen la configuración del proxy del sistema.",
+        "bothProxyAndTun": "Apps that follow the system proxy enter the core through the proxy port; TUN captures the rest (apps that ignore the system proxy). This is a valid combination and does not need fixing."
       }
     },
     "clashInfo": {

@@ -33,11 +33,13 @@
         "systemProxyDisabled": "Proxy do sistema desativado",
         "tunModeServiceRequired": "Modo TUN requer o serviço",
         "tunModeEnabled": "Modo TUN ativado",
-        "tunModeDisabled": "Modo TUN desativado"
+        "tunModeDisabled": "Modo TUN desativado",
+        "bothProxyAndTunEnabled": "System Proxy and TUN Mode are both enabled"
       },
       "tooltips": {
         "systemProxy": "Informações do proxy do sistema",
-        "tunMode": "Informações de interceptação do modo TUN"
+        "tunMode": "Informações de interceptação do modo TUN",
+        "bothProxyAndTun": "Apps that follow the system proxy enter the core through the proxy port; TUN captures the rest (apps that ignore the system proxy). This is a valid combination and does not need fixing."
       }
     },
     "clashInfo": {

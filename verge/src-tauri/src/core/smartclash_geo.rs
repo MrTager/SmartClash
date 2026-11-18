@@ -283,6 +283,10 @@ pub async fn snapshot() -> MapSnapshot {
 mod tests {
     use super::*;
 
+    /// 这些测试共用全局 CACHE，并行清理会互相冲掉对方刚插入的条目，
+    /// 造成偶发失败；串行化消除竞争。
+    static CACHE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn location_service_never_receives_private_or_fake_addresses() {
         for ip in [
@@ -308,6 +312,7 @@ mod tests {
 
     #[test]
     fn pending_hosts_are_not_counted_as_unmapped() {
+        let _serial = CACHE_TEST_LOCK.lock();
         CACHE.lock().clear();
         let servers: HashMap<String, String> = [
             ("节点A".to_owned(), "a.example.com".to_owned()),
@@ -329,9 +334,9 @@ mod tests {
 
     #[test]
     fn failed_lookups_are_unmapped_but_pending_ones_are_skipped() {
+        let _serial = CACHE_TEST_LOCK.lock();
         CACHE.lock().clear();
-        let servers: HashMap<String, String> =
-            [("节点A".to_owned(), "a.example.com".to_owned())].into();
+        let servers: HashMap<String, String> = [("节点A".to_owned(), "a.example.com".to_owned())].into();
         let chain = ["节点A".to_owned()];
 
         // 全部未解析 → pending, 不应计入 unmapped

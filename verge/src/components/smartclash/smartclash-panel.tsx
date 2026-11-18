@@ -13,8 +13,8 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material'
-import { useState } from 'react'
 import type { PaperProps } from '@mui/material/Paper'
+import { useState } from 'react'
 
 import { useProfiles } from '@/hooks/use-profiles'
 import { useSmartClash } from '@/hooks/use-smartclash'
@@ -41,7 +41,7 @@ const statuses: Record<string, string> = {
   idle: '等待检测',
   probing: '后台检测中',
   ready: '线路已验证',
-  manual: '保留手动选择',
+  manual: '手动选择（自动切换已暂停）',
   error: '检测未通过，保留当前线路',
   degraded: '当前线路待复检，保留连接',
   direct: '直连模式，暂停智能检测',
@@ -115,7 +115,14 @@ export function SmartClashPanel() {
     (group) => group.name === 'ALL-SUBSCRIPTIONS',
   )
   const smartNow = smartGroup?.now ?? data?.selected ?? null
-  const rulesActive = (data?.settings.enabled ?? false) && (data?.settings.smartRules ?? false)
+  const rulesActive =
+    (data?.settings.enabled ?? false) && (data?.settings.smartRules ?? false)
+  // 「自动维护」开关是长期偏好；手动选择节点只在本会话暂停自动切换，
+  // 两者并存属于正常状态，需要显式展示，避免误以为开关失效或互相冲突。
+  const autoPaused =
+    (data?.settings.enabled ?? false) &&
+    (data?.settings.automatic ?? false) &&
+    data?.status === 'manual'
   const effectiveRoute = !data?.settings.enabled
     ? '智能选路未启用，流量按订阅原有规则分流。'
     : rulesActive
@@ -217,9 +224,7 @@ export function SmartClashPanel() {
                   width: 8,
                   height: 8,
                   borderRadius: '50%',
-                  bgcolor: rulesActive
-                    ? 'success.light'
-                    : 'text.disabled',
+                  bgcolor: rulesActive ? 'success.light' : 'text.disabled',
                 }}
               />
               <Typography sx={{ fontWeight: 700 }}>生效链路</Typography>
@@ -279,6 +284,15 @@ export function SmartClashPanel() {
             }
             label="自动维护备用与故障切换"
           />
+          {autoPaused && (
+            <Typography
+              variant="caption"
+              color="warning.main"
+              sx={{ display: 'block', mt: -0.5 }}
+            >
+              自动切换当前因手动选择而暂停（开关表示长期偏好）；点「恢复自动选路」立即继续。
+            </Typography>
+          )}
           <FormControlLabel
             control={
               <Switch
@@ -307,7 +321,8 @@ export function SmartClashPanel() {
           />
           <Typography variant="caption" color="text.secondary">
             规则只把流量交给它匹配到的组：启用国内直连规则后，非国内流量统一走
-            SMARTCLASH 组（即上方生效链路）。其它组的节点选择不影响流量，除非某条规则引用了该组。
+            SMARTCLASH
+            组（即上方生效链路）。其它组的节点选择不影响流量，除非某条规则引用了该组。
           </Typography>
           <Button
             variant="contained"
@@ -337,7 +352,9 @@ export function SmartClashPanel() {
             options={sourceOptions.flatMap((item) =>
               item.uid ? [item.uid] : [],
             )}
-            value={sourceOptions.flatMap((item) => item.uid ? [item.uid] : [])}
+            value={sourceOptions.flatMap((item) =>
+              item.uid ? [item.uid] : [],
+            )}
             getOptionLabel={(uid) =>
               sourceOptions.find((item) => item.uid === uid)?.name ?? uid
             }

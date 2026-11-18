@@ -77,7 +77,16 @@ pub fn classify_ai(status: u16, body: &[u8]) -> Option<bool> {
     None
 }
 
-pub fn isolated_config(plan: &Plan, candidate: &Candidate, port: u16, credential: &str) -> Result<Mapping> {
+/// 出口绑定探测：接口绑定让探测内核绕过系统 TUN/主内核直连候选；
+/// DNS 直连公共解析避免拿到 fake-IP。两者缺一，主线路一断全部探测同时失败，
+/// 自动切换永远无法确认任何候选。
+pub fn isolated_config(
+    plan: &Plan,
+    candidate: &Candidate,
+    port: u16,
+    credential: &str,
+    interface: Option<&str>,
+) -> Result<Mapping> {
     let mut needed = HashSet::new();
     let mut cursor = Some(candidate.name.as_str());
     while let Some(name) = cursor {
@@ -106,8 +115,15 @@ pub fn isolated_config(plan: &Plan, candidate: &Candidate, port: u16, credential
         .cloned()
         .collect();
     let mut config: Mapping = serde_yaml_ng::from_str(
-        "mixed-port: 0\nport: 0\nsocks-port: 0\nredir-port: 0\ntproxy-port: 0\nallow-lan: false\nbind-address: 127.0.0.1\nexternal-controller: ''\nmode: rule\nlog-level: silent\nipv6: false\ntun: {enable: false}\ndns: {enable: false}\nprofile: {store-selected: false, store-fake-ip: false}\n",
+        // DNS 必须直连公共解析：系统解析被 TUN 劫持后节点域名会拿到 fake-IP，
+        // 探测流量随之套进主内核当前线路，全部候选测得同一复合质量。
+        "mixed-port: 0\nport: 0\nsocks-port: 0\nredir-port: 0\ntproxy-port: 0\nallow-lan: false\nbind-address: 127.0.0.1\nexternal-controller: ''\nmode: rule\nlog-level: silent\nipv6: false\ntun: {enable: false}\ndns: {enable: true, listen: 127.0.0.1:0, ipv6: false, enhanced-mode: redir-host, default-nameserver: [223.5.5.5, 119.29.29.29], nameserver: [223.5.5.5, 119.29.29.29]}\nprofile: {store-selected: false, store-fake-ip: false}\n",
     )?;
+    // 显式绑定物理网卡绕过 TUN 默认路由；auto-detect-interface 在探测内核里只会
+    // 选回 TUN 自身（它没有自己的 TUN 可排除），所以必须传入主内核已检测的出口。
+    if let Some(interface) = interface.filter(|name| !name.is_empty()) {
+        config.insert("interface-name".into(), Value::from(interface));
+    }
     config.insert("mixed-port".into(), port.into());
     config.insert("authentication".into(), vec![Value::from(credential)].into());
     config.insert("proxies".into(), proxies.into());
@@ -139,13 +155,18 @@ impl Drop for ProbeCore {
     }
 }
 
-async fn start(binary: &Path, plan: &Plan, candidate: &Candidate) -> Result<(ProbeCore, Client)> {
+async fn start(
+    binary: &Path,
+    plan: &Plan,
+    candidate: &Candidate,
+    interface: Option<&str>,
+) -> Result<(ProbeCore, Client)> {
     ensure!(binary.is_file(), "缺少隔离探测 Mihomo 内核：{}", binary.display());
     let reservation = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let port = reservation.local_addr()?.port();
     let token = nanoid::nanoid!(32);
     let credential = format!("smartclash:{token}");
-    let config = isolated_config(plan, candidate, port, &credential)?;
+    let config = isolated_config(plan, candidate, port, &credential, interface)?;
     let root = crate::utils::dirs::app_home_dir()?;
     let directory = root.join(format!("smartclash-probe-{}-{}", std::process::id(), nanoid::nanoid!()));
     tokio::fs::create_dir_all(&root).await?;
@@ -237,8 +258,14 @@ async fn limited_body(mut response: Response, limit: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-pub async fn measure(binary: &Path, plan: &Plan, candidate: &Candidate, mode: Mode) -> Result<Measurement> {
-    let (_core, client) = start(binary, plan, candidate).await?;
+pub async fn measure(
+    binary: &Path,
+    plan: &Plan,
+    candidate: &Candidate,
+    mode: Mode,
+    interface: Option<&str>,
+) -> Result<Measurement> {
+    let (_core, client) = start(binary, plan, candidate, interface).await?;
     let mut result = Measurement::empty(&candidate.name);
     let started = Instant::now();
     let response = client.get(HTTPS_TARGET).send().await?;
@@ -313,13 +340,49 @@ mod tests {
             chain: vec!["fixture".into()],
             hong_kong: false,
         };
-        let config = isolated_config(&plan, &candidate, 12345, "fixture:password")?;
+        let config = isolated_config(&plan, &candidate, 12345, "fixture:password", None)?;
         assert_eq!(config["tun"]["enable"].as_bool(), Some(false));
-        assert_eq!(config["dns"]["enable"].as_bool(), Some(false));
         assert_eq!(config["external-controller"].as_str(), Some(""));
         assert!(!config.contains_key("proxy-providers"));
         assert_eq!(config["rules"][0].as_str(), Some("MATCH,SMARTCLASH-PROBE"));
         assert_eq!(config["authentication"][0].as_str(), Some("fixture:password"));
+        Ok(())
+    }
+
+    #[test]
+    fn isolated_probes_bind_the_physical_interface_and_resolve_dns_directly() -> Result<()> {
+        // 系统路由被 TUN 接管后，未绑定出口的探测流量会先进主内核的当前线路：
+        // 所有候选测得同一复合质量，主线路断线时全部探测失败，故障切换失效。
+        let plan = Plan {
+            definitions: vec![serde_yaml_ng::from_str(
+                "{name: fixture, type: socks5, server: 127.0.0.1, port: 9}",
+            )?],
+            ..Plan::default()
+        };
+        let candidate = Candidate {
+            name: "fixture".into(),
+            chain: vec!["fixture".into()],
+            hong_kong: false,
+        };
+        let config = isolated_config(&plan, &candidate, 12345, "fixture:password", Some("以太网"))?;
+        assert_eq!(config["interface-name"].as_str(), Some("以太网"));
+        assert_eq!(config["dns"]["enable"].as_bool(), Some(true));
+        let nameservers = config["dns"]["nameserver"]
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("missing nameserver"))?;
+        assert!(
+            nameservers
+                .iter()
+                .all(|server| server.as_str().is_some_and(|s| !s.is_empty()))
+        );
+        let defaults = config["dns"]["default-nameserver"]
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("missing default-nameserver"))?;
+        assert!(!defaults.is_empty());
+        // 拿不到主内核出口时允许不绑定（行为与旧版一致），但拿到时必须是显式接口。
+        let unbound = isolated_config(&plan, &candidate, 12345, "fixture:password", None)?;
+        assert!(!unbound.contains_key("interface-name"));
+        assert!(!unbound.contains_key("auto-detect-interface"));
         Ok(())
     }
 

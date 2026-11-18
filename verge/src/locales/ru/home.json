@@ -33,11 +33,13 @@
         "systemProxyDisabled": "Системный прокси отключён — большинству пользователей рекомендуется его включить",
         "tunModeServiceRequired": "Режим TUN требует установленной службы Clash Verge",
         "tunModeEnabled": "Режим TUN включён — приложения используют виртуальный сетевой интерфейс",
-        "tunModeDisabled": "Режим TUN отключён"
+        "tunModeDisabled": "Режим TUN отключён",
+        "bothProxyAndTunEnabled": "System Proxy and TUN Mode are both enabled"
       },
       "tooltips": {
         "systemProxy": "Разрешает изменение системных настроек прокси. Если не удаётся, настройте прокси вручную",
-        "tunMode": "Режим TUN перехватывает трафик всех приложений и подходит для программ, не работающих через системный прокси"
+        "tunMode": "Режим TUN перехватывает трафик всех приложений и подходит для программ, не работающих через системный прокси",
+        "bothProxyAndTun": "Apps that follow the system proxy enter the core through the proxy port; TUN captures the rest (apps that ignore the system proxy). This is a valid combination and does not need fixing."
       }
     },
     "clashInfo": {

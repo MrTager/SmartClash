@@ -33,11 +33,13 @@
         "systemProxyDisabled": "Sistem vekil'i devre dışı, çoğu kullanıcı için bu seçeneği açmanız önerilir",
         "tunModeServiceRequired": "TUN modu hizmet modu gerektirir, lütfen önce hizmeti kurun",
         "tunModeEnabled": "TUN modu etkinleştirildi, uygulamalar sanal ağ kartı üzerinden ağa erişecek",
-        "tunModeDisabled": "TUN modu devre dışı, özel uygulamalar için uygundur"
+        "tunModeDisabled": "TUN modu devre dışı, özel uygulamalar için uygundur",
+        "bothProxyAndTunEnabled": "System Proxy and TUN Mode are both enabled"
       },
       "tooltips": {
         "systemProxy": "İşletim sisteminin vekil ayarlarını değiştirmek için etkinleştirin. Etkinleştirme başarısız olursa, işletim sisteminin proxy ayarlarını manuel olarak değiştirin",
-        "tunMode": "TUN modu tüm uygulama trafiğini ele alabilir, sistem vekil ayarlarını takip etmeyen özel uygulamalar için uygundur"
+        "tunMode": "TUN modu tüm uygulama trafiğini ele alabilir, sistem vekil ayarlarını takip etmeyen özel uygulamalar için uygundur",
+        "bothProxyAndTun": "Apps that follow the system proxy enter the core through the proxy port; TUN captures the rest (apps that ignore the system proxy). This is a valid combination and does not need fixing."
       }
     },
     "clashInfo": {

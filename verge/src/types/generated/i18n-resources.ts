@@ -109,6 +109,7 @@ export interface TranslationResources {
         }
         proxyTun: {
           status: {
+            bothProxyAndTunEnabled: string
             systemProxyDisabled: string
             systemProxyEnabled: string
             tunModeDisabled: string
@@ -116,6 +117,7 @@ export interface TranslationResources {
             tunModeServiceRequired: string
           }
           tooltips: {
+            bothProxyAndTun: string
             systemProxy: string
             tunMode: string
           }
@@ -1589,6 +1591,7 @@ export interface TranslationResources {
           noDisney: string
           originalsOnly: string
           pending: string
+          risky: string
           unsupportedRegion: string
           yes: string
         }
