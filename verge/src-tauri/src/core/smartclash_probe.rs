@@ -258,6 +258,18 @@ async fn limited_body(mut response: Response, limit: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+async fn check_latency(client: &Client) -> Result<u64> {
+    let started = Instant::now();
+    let response = client.get(HTTPS_TARGET).send().await?;
+    ensure!(
+        response.status().as_u16() == 204,
+        "HTTPS 出网未通过：{}",
+        response.status()
+    );
+    limited_body(response, 4096).await?;
+    Ok(started.elapsed().as_millis().max(1) as u64)
+}
+
 pub async fn measure(
     binary: &Path,
     plan: &Plan,
@@ -267,17 +279,15 @@ pub async fn measure(
 ) -> Result<Measurement> {
     let (_core, client) = start(binary, plan, candidate, interface).await?;
     let mut result = Measurement::empty(&candidate.name);
-    let started = Instant::now();
-    let response = client.get(HTTPS_TARGET).send().await?;
-    ensure!(
-        response.status().as_u16() == 204,
-        "HTTPS 出网未通过：{}",
-        response.status()
-    );
-    limited_body(response, 4096).await?;
-    result.latency_ms = Some(started.elapsed().as_millis().max(1) as u64);
+    // 单次丢包不应把可用节点冷却 60 秒；出网检查失败后复检一次。
+    result.latency_ms = Some(match check_latency(&client).await {
+        Ok(latency) => latency,
+        Err(first) => check_latency(&client)
+            .await
+            .map_err(|second| second.context(format!("出网复检仍未通过（首次失败：{first:#}）")))?,
+    });
     if mode == Mode::Ai {
-        result.ai_reachable = Some(false);
+        // 不可判定（限流、非 JSON 响应）保持 None：不能解锁，但也不是「确认被墙」。
         if let Ok(response) = client.get(AI_TARGET).send().await {
             let status = response.status().as_u16();
             if let Ok(body) = limited_body(response, 65_536).await {

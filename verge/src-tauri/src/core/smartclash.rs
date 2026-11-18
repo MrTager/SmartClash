@@ -86,6 +86,7 @@ static LOADED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 static OPERATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const FRESH: Duration = Duration::from_secs(15);
 const COOLDOWN: Duration = Duration::from_secs(60);
+const SWITCH_COOLDOWN: Duration = Duration::from_secs(10);
 const SCAN_LIMIT: usize = 12;
 const SPEED_LIMIT: usize = 6;
 
@@ -158,7 +159,13 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 fn process_alive(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
+    // /proc 只在 Linux 上存在；macOS 等平台用 kill(pid, 0) 探活。
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
 fn supersede(state: &mut State) {
@@ -572,7 +579,11 @@ async fn run(explicit: bool) -> Result<()> {
         let mut state = STATE.lock();
         ensure!(state.snapshot.settings.enabled, "请先启用 SmartClash");
         if state.snapshot.busy {
-            return Ok(());
+            if !explicit {
+                return Ok(());
+            }
+            // 手动优化取代进行中的监控轮次，而不是被静默丢弃。
+            supersede(&mut state);
         }
         if !explicit && (!state.snapshot.settings.automatic || state.manual) {
             return Ok(());
@@ -739,14 +750,13 @@ async fn run(explicit: bool) -> Result<()> {
             } else if healthy == Some(false) {
                 state.failures = state.failures.saturating_add(1);
             }
-            let threshold = if settings.mode == Mode::Ai { 1 } else { 2 };
+            // 探测已含重试；确认死亡立即切换，仅用切换冷却防抖（与旧版阈值 1、冷却 10 秒一致）。
             let preserve = !explicit
                 && baseline.is_some()
                 && (healthy != Some(false)
-                    || state.failures < threshold
                     || state
                         .last_switch
-                        .is_some_and(|last| last.elapsed() < Duration::from_secs(30)));
+                        .is_some_and(|last| last.elapsed() < SWITCH_COOLDOWN));
             let ready = if preserve {
                 plan.candidates
                     .iter()
@@ -803,8 +813,8 @@ async fn run(explicit: bool) -> Result<()> {
         }
         let can_switch = { allowed(&STATE.lock(), generation) };
         if can_switch || explicit {
-            let mut switched = false;
-            if actual.as_deref() != Some(&best.name) {
+            let switched = actual.as_deref() != Some(best.name.as_str());
+            if switched {
                 // 仅修改独立 SMARTCLASH 组，不改变父组、规则、系统代理或 TUN。
                 tokio::time::timeout(
                     Duration::from_secs(4),
@@ -815,11 +825,6 @@ async fn run(explicit: bool) -> Result<()> {
                     actual_selection().await?.as_deref() == Some(best.name.as_str()),
                     "内核未确认新线路，保留状态待复检"
                 );
-                crate::config::profiles::record_smartclash_selection(GROUP, &best.name).await?;
-                Handle::refresh_clash();
-                switched = true;
-            }
-            if switched {
                 // 旧线路上的既有连接不会自己迁移，断线场景下会一直挂着直到应用放弃；
                 // 与切换 Clash 模式一致，按 auto_close_connection 关闭全部连接让流量
                 // 立刻走上新线路。
@@ -840,26 +845,35 @@ async fn run(explicit: bool) -> Result<()> {
                     }
                 }
             }
-            let mut state = STATE.lock();
-            if state.generation == generation {
-                if actual.as_deref() != Some(best.name.as_str()) {
-                    state.last_switch = Some(Instant::now());
-                    state.failures = 0;
+            {
+                let mut state = STATE.lock();
+                if state.generation == generation {
+                    if switched {
+                        state.last_switch = Some(Instant::now());
+                        state.failures = 0;
+                    }
+                    state.owned_selection = Some(best.name.clone());
+                    state.snapshot.selected = Some(best.name.clone());
+                    state.snapshot.chain = best.chain.clone();
+                    state.snapshot.status = if state
+                        .samples
+                        .get(&state.snapshot.selected.clone().unwrap_or_default())
+                        .is_some_and(|sample| {
+                            sample.checked.elapsed() <= FRESH && is_healthy(settings.mode, &sample.measurement)
+                        }) {
+                        "ready"
+                    } else {
+                        "degraded"
+                    }
+                    .into();
                 }
-                state.owned_selection = Some(best.name.clone());
-                state.snapshot.selected = Some(best.name);
-                state.snapshot.chain = best.chain;
-                state.snapshot.status = if state
-                    .samples
-                    .get(&state.snapshot.selected.clone().unwrap_or_default())
-                    .is_some_and(|sample| {
-                        sample.checked.elapsed() <= FRESH && is_healthy(settings.mode, &sample.measurement)
-                    }) {
-                    "ready"
-                } else {
-                    "degraded"
+            }
+            // 先落状态再记录；记录失败只降级为警告，不能让下一轮误判成手动操作。
+            if switched {
+                if let Err(error) = crate::config::profiles::record_smartclash_selection(GROUP, &best.name).await {
+                    logging!(warn, Type::Core, "线路已切换但未能记录选择，下次配置重载可能回退：{error:#}");
                 }
-                .into();
+                Handle::refresh_clash();
             }
         } else {
             let mut state = STATE.lock();
