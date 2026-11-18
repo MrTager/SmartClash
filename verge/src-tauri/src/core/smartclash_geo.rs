@@ -76,11 +76,16 @@ fn public_ip(ip: IpAddr) -> bool {
 /// keeps the resolved target in that case.
 fn destination_ip(connection: &tauri_plugin_mihomo::models::Connection) -> String {
     let metadata = &connection.metadata;
-    if metadata.destination_ip.is_empty() {
-        metadata.remote_destination.clone()
-    } else {
-        metadata.destination_ip.clone()
-    }
+    destination_host(&metadata.destination_ip, &metadata.remote_destination, &metadata.host)
+}
+
+fn destination_host(destination: &str, remote: &str, host: &str) -> String {
+    [destination, remote]
+        .into_iter()
+        .find(|value| value.parse::<IpAddr>().is_ok_and(public_ip))
+        .or_else(|| (!host.is_empty() && host.parse::<IpAddr>().map_or(true, public_ip)).then_some(host))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn cached(host: &str) -> Option<Location> {
@@ -224,15 +229,20 @@ pub async fn snapshot() -> MapSnapshot {
         Ok(Ok(value)) => value.connections.unwrap_or_default(),
         _ => Vec::new(),
     };
-    let mut hosts: Vec<String> = connections
+    let mut hosts: Vec<String> = servers.values().cloned().collect();
+    // Resolve the active chain before inactive subscription nodes and transient destinations.
+    for connection in connections.iter().take(64).rev() {
+        for name in &connection.chains {
+            if let Some(server) = servers.get(name) {
+                hosts.insert(0, server.clone());
+            }
+        }
+    }
+    hosts.extend(connections
         .iter()
         .take(64)
         .map(|connection| destination_ip(connection))
-        .filter(|ip| ip.parse::<IpAddr>().is_ok_and(public_ip))
-        .collect();
-    // 节点服务器优先: 它们决定节点/连线的可绘制性, 每轮解析额度有限,
-    // 排在连接目标前面避免被大量一次性 destination 饿死
-    hosts.extend(servers.values().cloned());
+        .filter(|host| !host.is_empty()));
     let mut result = MapSnapshot::default();
     for (name, server) in &servers {
         if let Some(location) = cached(server) {
@@ -282,6 +292,14 @@ pub async fn snapshot() -> MapSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fake_destination_uses_remote_ip_or_domain_without_locating_fake_addresses() {
+        assert_eq!(destination_host("198.18.0.1", "8.8.8.8", "example.com"), "8.8.8.8");
+        assert_eq!(destination_host("198.18.0.1", "", "example.com"), "example.com");
+        assert_eq!(destination_host("", "", "127.0.0.1"), "");
+        assert_eq!(destination_host("1.1.1.1", "8.8.8.8", "example.com"), "1.1.1.1");
+    }
 
     /// 这些测试共用全局 CACHE，并行清理会互相冲掉对方刚插入的条目，
     /// 造成偶发失败；串行化消除竞争。

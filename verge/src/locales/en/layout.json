@@ -2,15 +2,15 @@
   "components": {
     "navigation": {
       "tabs": {
-        "home": "Home",
+        "home": "Overview",
         "smart": "Smart Proxy",
         "normal": "Normal Proxy",
-        "proxies": "Proxies",
+        "proxies": "Routes",
         "profiles": "Profiles",
         "connections": "Connections",
         "rules": "Rules",
         "logs": "Logs",
-        "unlock": "Test",
+        "unlock": "Diagnostics",
         "settings": "Settings"
       },
       "menu": {

@@ -2,15 +2,15 @@
   "components": {
     "navigation": {
       "tabs": {
-        "home": "首 页",
+        "home": "概览",
         "smart": "智能代理",
         "normal": "普通代理",
-        "proxies": "代 理",
+        "proxies": "线路",
         "profiles": "订 阅",
         "connections": "连 接",
         "rules": "规 则",
         "logs": "日 志",
-        "unlock": "测 试",
+        "unlock": "诊断",
         "settings": "设 置"
       },
       "menu": {

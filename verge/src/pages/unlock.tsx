@@ -25,6 +25,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { BaseEmpty, BasePage } from '@/components/base'
+import { DiagnosticTabs } from '@/components/smartclash/diagnostic-tabs'
 import {
   checkMediaUnlock,
   checkMediaUnlockItem,
@@ -234,7 +235,7 @@ const UnlockPage = () => {
 
   return (
     <BasePage
-      title={t('tests.unlock.page.title')}
+      title={<DiagnosticTabs />}
       header={
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <Button

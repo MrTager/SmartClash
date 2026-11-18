@@ -6,7 +6,7 @@ import {
   ListItemText,
 } from '@mui/material'
 import type { ReactNode } from 'react'
-import { useMatch, useNavigate, useResolvedPath } from 'react-router'
+import { useLocation, useMatch, useNavigate, useResolvedPath } from 'react-router'
 
 import type { SortableItemRenderProps } from '@/components/base/sortable-item'
 import { useVerge } from '@/hooks/use-verge'
@@ -24,6 +24,8 @@ export const LayoutItem = (props: Props) => {
   const navCollapsed = verge?.collapse_navbar ?? false
   const resolved = useResolvedPath(to)
   const match = useMatch({ path: resolved.pathname, end: true })
+  const { pathname } = useLocation()
+  const selected = !!match || (to === '/unlock' && pathname === '/logs') || (to === '/proxies' && pathname === '/advanced-proxies')
   const navigate = useNavigate()
 
   const effectiveMenuIcon =
@@ -37,7 +39,7 @@ export const LayoutItem = (props: Props) => {
     >
       <ListItemButton
         ref={sortable?.handleRef}
-        selected={!!match}
+        selected={selected}
         sx={[
           {
             borderRadius: 2,

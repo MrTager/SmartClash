@@ -534,7 +534,7 @@ const PersistentProxySelect = ({
   )
 }
 
-export const CurrentProxyCard = () => {
+export const CurrentProxyCard = ({ trafficOnly = false }: { trafficOnly?: boolean }) => {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const theme = useTheme()
@@ -642,9 +642,10 @@ export const CurrentProxyCard = () => {
     return proxyView.groups.filter(
       (group) =>
         !group.hidden &&
+        (!trafficOnly || group.name === 'SMARTCLASH') &&
         (group.type === 'Selector' || group.type === 'URLTest'),
     )
-  }, [proxyView])
+  }, [proxyView, trafficOnly])
 
   const selectedGroup = useMemo<ProxyGroupView | null>(() => {
     if (!proxyView || isDirectMode) return null

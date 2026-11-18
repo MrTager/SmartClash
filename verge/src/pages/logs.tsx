@@ -17,6 +17,7 @@ import {
   type VirtualListHandle,
 } from '@/components/base'
 import LogItem from '@/components/log/log-item'
+import { DiagnosticTabs } from '@/components/smartclash/diagnostic-tabs'
 import { useClashLog } from '@/hooks/use-clash-log'
 import { useLogData } from '@/hooks/use-log-data'
 
@@ -87,7 +88,7 @@ const LogPage = () => {
   return (
     <BasePage
       full
-      title={t('logs.page.title')}
+      title={<DiagnosticTabs />}
       contentStyle={{
         height: '100%',
         display: 'flex',

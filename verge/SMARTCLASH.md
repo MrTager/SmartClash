@@ -122,3 +122,20 @@ service integration still require platform testing.
 Signed SmartClash application updates are disabled until a separate signed
 release feed exists. Upstream application updates would overwrite SmartClash.
 Mihomo core update controls retain upstream behavior.
+
+## Unified Routing Workspace
+
+The overview owns global system-proxy and TUN controls. Routing policy does not
+start or stop the core and never changes TUN or system-proxy preferences.
+The routes workspace uses one SMARTCLASH traffic carrier for both automatic
+selection and manual pinning. Entering this workspace's managed routing policy
+enables domestic-direct rules; the page explains this before activation.
+Advanced subscription policy groups remain available separately.
+
+The navigation contains Overview, Routes, Profiles, Connections, Rules,
+Diagnostics, and Settings. Legacy `/smart` and `/normal` URLs redirect to
+`/proxies`; diagnostics keeps `/unlock` and `/logs` as its two tabs.
+Per-mode TUN localStorage preferences from earlier releases are no longer read.
+
+Globe coordinates describe resolved server/target addresses, not verified exit
+locations. A node label must never be used as evidence of its actual exit region.

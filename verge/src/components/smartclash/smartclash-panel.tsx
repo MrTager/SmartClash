@@ -259,19 +259,6 @@ export function SmartClashPanel() {
                 ? '验证 HTTPS 出网及 OpenAI API 可达性；不代表网页登录或账号权限。'
                 : '按实际 HTTPS 延迟选择线路，当前线路健康时保持连接。'}
           </Typography>
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={data?.settings.automatic ?? false}
-                disabled={!data || pending}
-                onChange={(_, automatic) => {
-                  void save({ automatic })
-                }}
-              />
-            }
-            label="自动维护备用与故障切换"
-          />
           {autoPaused && (
             <Typography
               variant="caption"
@@ -355,18 +342,6 @@ export function SmartClashPanel() {
                 size="small"
               />
             )}
-          />
-          <FormControlLabel
-            control={
-              <Switch
-                checked={data.settings.smartRules ?? false}
-                disabled={pending}
-                onChange={(_, smartRules) => {
-                  void save({ smartRules })
-                }}
-              />
-            }
-            label="使用 SmartClash 国内直连规则（替换订阅分流规则）"
           />
           <Stack direction="row" spacing={1}>
             <Button

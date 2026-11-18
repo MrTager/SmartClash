@@ -1,36 +1,27 @@
-import AutoAwesomeOutlinedIcon from '@mui/icons-material/AutoAwesomeOutlined'
 import DnsOutlinedIcon from '@mui/icons-material/DnsOutlined'
 import ForkRightOutlinedIcon from '@mui/icons-material/ForkRightOutlined'
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined'
 import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined'
-import LanOutlinedIcon from '@mui/icons-material/LanOutlined'
 import LockOpenOutlinedIcon from '@mui/icons-material/LockOpenOutlined'
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
-import SubjectOutlinedIcon from '@mui/icons-material/SubjectOutlined'
 import WifiOutlinedIcon from '@mui/icons-material/WifiOutlined'
 import { type ComponentType, type ReactNode } from 'react'
 
 import ConnectionsSvg from '@/assets/image/itemicon/connections.svg?react'
 import HomeSvg from '@/assets/image/itemicon/home.svg?react'
-import LogsSvg from '@/assets/image/itemicon/logs.svg?react'
-import NormalSvg from '@/assets/image/itemicon/normal.svg?react'
 import ProfilesSvg from '@/assets/image/itemicon/profiles.svg?react'
 import ProxiesSvg from '@/assets/image/itemicon/proxies.svg?react'
 import RulesSvg from '@/assets/image/itemicon/rules.svg?react'
 import SettingsSvg from '@/assets/image/itemicon/settings.svg?react'
-import SmartSvg from '@/assets/image/itemicon/smart.svg?react'
 import UnlockSvg from '@/assets/image/itemicon/unlock.svg?react'
 
 import { navigationItems } from './_navigation-meta'
 import ConnectionsPage from './connections'
 import HomePage from './home'
-import LogsPage from './logs'
-import NormalProxyPage from './normal'
+import LinesPage from './lines'
 import ProfilePage from './profiles'
-import ProxyPage from './proxies'
 import RulesPage from './rules'
 import SettingPage from './settings'
-import SmartProxyPage from './smart'
 import UnlockPage from './unlock'
 
 type NavigationItem = {
@@ -47,19 +38,9 @@ export const navItems: NavigationItem[] = [
     Component: HomePage,
   },
   {
-    ...navigationItems.smart,
-    icon: [<AutoAwesomeOutlinedIcon key="mui" />, <SmartSvg key="svg" />],
-    Component: SmartProxyPage,
-  },
-  {
-    ...navigationItems.normal,
-    icon: [<LanOutlinedIcon key="mui" />, <NormalSvg key="svg" />],
-    Component: NormalProxyPage,
-  },
-  {
     ...navigationItems.proxies,
     icon: [<WifiOutlinedIcon key="mui" />, <ProxiesSvg key="svg" />],
-    Component: ProxyPage,
+    Component: LinesPage,
   },
   {
     ...navigationItems.profiles,
@@ -75,11 +56,6 @@ export const navItems: NavigationItem[] = [
     ...navigationItems.rules,
     icon: [<ForkRightOutlinedIcon key="mui" />, <RulesSvg key="svg" />],
     Component: RulesPage,
-  },
-  {
-    ...navigationItems.logs,
-    icon: [<SubjectOutlinedIcon key="mui" />, <LogsSvg key="svg" />],
-    Component: LogsPage,
   },
   {
     ...navigationItems.unlock,
