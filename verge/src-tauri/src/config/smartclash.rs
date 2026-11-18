@@ -59,7 +59,6 @@ impl Settings {
             );
         }
         for names in [&self.entry_nodes, &self.exit_nodes] {
-            ensure!(names.len() <= 128, "入口或出口最多允许 128 个节点");
             let mut seen = std::collections::HashSet::new();
             for name in names {
                 ensure!(!name.trim().is_empty() && name.len() <= 1024, "节点名称为空或过长");
@@ -70,10 +69,6 @@ impl Settings {
             ensure!(
                 !self.entry_nodes.is_empty() && !self.exit_nodes.is_empty(),
                 "显式链路需要入口和出口"
-            );
-            ensure!(
-                self.entry_nodes.len() * self.exit_nodes.len() <= 128,
-                "入口 × 出口最多允许 128 个组合"
             );
         }
         Ok(())

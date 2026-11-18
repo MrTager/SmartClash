@@ -14,6 +14,7 @@ import {
   Typography,
 } from '@mui/material'
 import { useState } from 'react'
+import type { PaperProps } from '@mui/material/Paper'
 
 import { useProfiles } from '@/hooks/use-profiles'
 import { useSmartClash } from '@/hooks/use-smartclash'
@@ -45,6 +46,29 @@ const statuses: Record<string, string> = {
   degraded: '当前线路待复检，保留连接',
   direct: '直连模式，暂停智能检测',
 }
+
+const SelectAllToolbar = ({
+  allSelected,
+  onToggleAll,
+}: {
+  allSelected: boolean
+  onToggleAll: () => void
+}) => (
+  <Stack direction="row" sx={{ justifyContent: 'flex-end', px: 1.5, py: 0.75 }}>
+    <Button size="small" onClick={onToggleAll}>
+      {allSelected ? '取消全选' : '全选'}
+    </Button>
+  </Stack>
+)
+
+const selectAllPaper =
+  (allSelected: boolean, onToggleAll: () => void) =>
+  ({ children, ...paper }: PaperProps) => (
+    <Paper {...paper}>
+      <SelectAllToolbar allSelected={allSelected} onToggleAll={onToggleAll} />
+      {children}
+    </Paper>
+  )
 
 export function SmartClashPanel() {
   const { data, error, patch, optimize } = useSmartClash()
@@ -388,11 +412,25 @@ export function SmartClashPanel() {
           >
             <Autocomplete
               multiple
+              disableCloseOnSelect
               options={nodes}
               value={data.settings.entryNodes}
               disabled={pending}
               onChange={(_, entryNodes) => {
                 void save({ entryNodes })
+              }}
+              slotProps={{
+                paper: selectAllPaper(
+                  data.settings.entryNodes.length >= nodes.length &&
+                    nodes.length > 0,
+                  () =>
+                    void save({
+                      entryNodes:
+                        data.settings.entryNodes.length >= nodes.length
+                          ? []
+                          : [...nodes],
+                    }),
+                ),
               }}
               renderInput={(params) => (
                 <TextField {...params} label="入口节点" size="small" />
@@ -400,11 +438,25 @@ export function SmartClashPanel() {
             />
             <Autocomplete
               multiple
+              disableCloseOnSelect
               options={nodes}
               value={data.settings.exitNodes}
               disabled={pending}
               onChange={(_, exitNodes) => {
                 void save({ exitNodes })
+              }}
+              slotProps={{
+                paper: selectAllPaper(
+                  data.settings.exitNodes.length >= nodes.length &&
+                    nodes.length > 0,
+                  () =>
+                    void save({
+                      exitNodes:
+                        data.settings.exitNodes.length >= nodes.length
+                          ? []
+                          : [...nodes],
+                    }),
+                ),
               }}
               renderInput={(params) => (
                 <TextField {...params} label="出口节点" size="small" />
@@ -426,7 +478,7 @@ export function SmartClashPanel() {
                 }}
               />
             }
-            label="组合入口与出口（最多 128 个组合）"
+            label="组合入口与出口"
           />
         </Stack>
       )}

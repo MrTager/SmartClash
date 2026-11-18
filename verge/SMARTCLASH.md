@@ -42,8 +42,9 @@ automatically; import them on the Profiles page.
   Additional profile updates rebuild the active aggregate. Provider-only sources
   do not support isolated optimization or local aggregate export. Cross-profile
   references to source strategy groups must be replaced with explicit nodes.
-- Explicit entry/exit combinations support up to 128 TCP chains. Optional
-  automatic exploration adds up to 48 bounded two-hop candidates. It does not
+- Explicit entry/exit combinations support an unbounded number of TCP chains,
+  bounded in practice by runtime configuration size. Optional automatic
+  exploration adds up to 48 bounded two-hop candidates. It does not
   reproduce the legacy unbounded-depth exploration strategy.
 - Optional SmartClash rules replace subscription routing with local/private
   direct, domestic domain/IP direct and `MATCH,SMARTCLASH`. The three providers
