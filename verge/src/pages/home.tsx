@@ -32,7 +32,6 @@ import { EnhancedCard } from '@/components/home/enhanced-card'
 import { EnhancedTrafficStats } from '@/components/home/enhanced-traffic-stats'
 import { HomeProfileCard } from '@/components/home/home-profile-card'
 import { ProxyTunCard } from '@/components/home/proxy-tun-card'
-import { SmartClashPanel } from '@/components/smartclash/smartclash-panel'
 import { useProfiles } from '@/hooks/use-profiles'
 import { useVerge } from '@/hooks/use-verge'
 import { entry_lightweight_mode } from '@/services/cmds'
@@ -354,7 +353,6 @@ const HomePage = () => {
         </Box>
       }
     >
-      <SmartClashPanel />
       <Grid container spacing={1.5} columns={{ xs: 6, sm: 6, md: 12 }}>
         {criticalCards}
 

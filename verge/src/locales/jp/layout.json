@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "ホーム",
+        "smart": "スマートプロキシ",
+        "normal": "通常プロキシ",
         "proxies": "プロキシ",
         "profiles": "プロファイル",
         "connections": "接続",

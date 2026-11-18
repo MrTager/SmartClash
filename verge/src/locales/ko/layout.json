@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "홈",
+        "smart": "스마트 프록시",
+        "normal": "일반 프록시",
         "proxies": "프록시",
         "profiles": "프로필",
         "connections": "연결",

@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "首 页",
+        "smart": "智能代理",
+        "normal": "普通代理",
         "proxies": "代 理",
         "profiles": "订 阅",
         "connections": "连 接",

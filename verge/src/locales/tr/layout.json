@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Ana Sayfa",
+        "smart": "Akıllı Proxy",
+        "normal": "Normal Proxy",
         "proxies": "Vekil'ler",
         "profiles": "Profiller",
         "connections": "Bağlantılar",

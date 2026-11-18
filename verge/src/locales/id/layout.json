@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Home",
+        "smart": "Proxy Pintar",
+        "normal": "Proxy Normal",
         "proxies": "Proksi",
         "profiles": "Profil",
         "connections": "Koneksi",

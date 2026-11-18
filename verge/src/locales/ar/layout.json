@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Home",
+        "smart": "الوكيل الذكي",
+        "normal": "الوكيل العادي",
         "proxies": "الوكلاء",
         "profiles": "الملفات الشخصية",
         "connections": "الاتصالات",

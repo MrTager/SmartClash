@@ -210,10 +210,12 @@ export interface TranslationResources {
             connections: string
             home: string
             logs: string
+            normal: string
             profiles: string
             proxies: string
             rules: string
             settings: string
+            smart: string
             unlock: string
           }
         }

@@ -1,5 +1,13 @@
 export const navigationItems = {
   home: { label: 'layout.components.navigation.tabs.home', path: '/' },
+  smart: {
+    label: 'layout.components.navigation.tabs.smart',
+    path: '/smart',
+  },
+  normal: {
+    label: 'layout.components.navigation.tabs.normal',
+    path: '/normal',
+  },
   proxies: {
     label: 'layout.components.navigation.tabs.proxies',
     path: '/proxies',

@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Главная",
+        "smart": "Умный прокси",
+        "normal": "Обычный прокси",
         "proxies": "Прокси",
         "profiles": "Профили",
         "connections": "Соединения",

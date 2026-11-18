@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Home",
+        "smart": "پروکسی هوشمند",
+        "normal": "پروکسی عادی",
         "proxies": "پراکسی‌ها",
         "profiles": "پروفایل‌ها",
         "connections": "اتصالات",

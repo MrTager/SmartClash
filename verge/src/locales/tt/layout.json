@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Home",
+        "smart": "Акыллы прокси",
+        "normal": "Гади прокси",
         "proxies": "Прокси",
         "profiles": "Профильләр",
         "connections": "Тоташулар",

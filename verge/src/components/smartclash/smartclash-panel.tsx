@@ -238,18 +238,6 @@ export function SmartClashPanel() {
               </Typography>
             )}
           </Box>
-          <FormControlLabel
-            control={
-              <Switch
-                checked={data?.settings.enabled ?? false}
-                disabled={!data || pending}
-                onChange={(_, enabled) => {
-                  void save({ enabled })
-                }}
-              />
-            }
-            label="启用智能选路"
-          />
           <ToggleButtonGroup
             exclusive
             size="small"

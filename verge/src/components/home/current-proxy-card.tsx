@@ -723,13 +723,19 @@ export const CurrentProxyCard = () => {
           group.name.toLowerCase().includes(keyword.toLowerCase()),
         ),
       ) ?? selectableGroups[0]
+    // 智能选路承载流量时，卡片默认落在承载组；其它组的选择不经过流量，
+    // 停在上面只会诱导出无效的手动选择。
+    const fallbackGroup =
+      smartCarriesTraffic && smartGroup
+        ? smartGroup.name
+        : selectableGroups.some(({ name }) => name === savedGroup)
+          ? savedGroup!
+          : (primaryGroup?.name ?? '')
     const nextGroup = selectableGroups.some(
       ({ name }) => name === selectedGroupName,
     )
       ? selectedGroupName
-      : selectableGroups.some(({ name }) => name === savedGroup)
-        ? savedGroup!
-        : (primaryGroup?.name ?? '')
+      : fallbackGroup
     if (nextGroup !== selectedGroupName) {
       setSelectedGroupName(nextGroup)
       if (nextGroup) writeProfileScopedItem(STORAGE_KEY_GROUP, nextGroup)
@@ -739,6 +745,8 @@ export const CurrentProxyCard = () => {
     isGlobalMode,
     proxyView,
     readProfileScopedItem,
+    smartCarriesTraffic,
+    smartGroup,
     selectableGroups,
     selectedGroupName,
     writeProfileScopedItem,

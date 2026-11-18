@@ -3,6 +3,8 @@
     "navigation": {
       "tabs": {
         "home": "Startseite",
+        "smart": "Intelligenter Proxy",
+        "normal": "Normaler Proxy",
         "proxies": "Proxy",
         "profiles": "Abonnement",
         "connections": "Verbindungen",
