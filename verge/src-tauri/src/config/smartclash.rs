@@ -79,10 +79,16 @@ fn path() -> Result<PathBuf> {
     Ok(crate::utils::dirs::app_home_dir()?.join("smartclash.json"))
 }
 
+/// 去掉 UTF-8 BOM（EF BB BF），兼容用 Windows 工具编辑过的 JSON 文件。
+fn strip_bom(data: &[u8]) -> &[u8] {
+    data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data)
+}
+
 pub async fn load() -> Result<Settings> {
     match tokio::fs::read(path()?).await {
         Ok(data) => {
-            let settings: Settings = serde_json::from_slice(&data).context("无法解析 smartclash.json")?;
+            let settings: Settings =
+                serde_json::from_slice(strip_bom(&data)).context("无法解析 smartclash.json")?;
             settings.validate()?;
             Ok(settings)
         }
@@ -116,6 +122,17 @@ mod tests {
             })
         );
         assert!(serde_json::from_value::<Settings>(serde_json::json!({"enabled": true})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn load_accepts_json_with_utf8_bom() -> Result<()> {
+        let expected = Settings::default();
+        let mut json = serde_json::to_vec(&expected)?;
+        let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+        with_bom.append(&mut json);
+        let settings: Settings = serde_json::from_slice(strip_bom(&with_bom))?;
+        assert_eq!(settings, expected);
         Ok(())
     }
 }
