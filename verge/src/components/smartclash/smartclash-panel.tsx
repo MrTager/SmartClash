@@ -70,6 +70,10 @@ const selectAllPaper =
     </Paper>
   )
 
+// Keep the select-all action in the option list so it is available even when
+// the dropdown is narrow or the toolbar is not visible.
+const SELECT_ALL_NODES = '__smartclash_select_all_nodes__'
+
 export function SmartClashPanel() {
   const { data, error, patch, optimize } = useSmartClash()
   const { profiles } = useProfiles()
@@ -393,11 +397,23 @@ export function SmartClashPanel() {
             <Autocomplete
               multiple
               disableCloseOnSelect
-              options={nodes}
+              options={[SELECT_ALL_NODES, ...nodes]}
               value={data.settings.entryNodes}
               disabled={pending}
+              getOptionLabel={(node) =>
+                node === SELECT_ALL_NODES ? '全选' : node
+              }
+              renderOption={(props, node) => (
+                <li {...props} key={node}>
+                  {node === SELECT_ALL_NODES ? '全选' : node}
+                </li>
+              )}
               onChange={(_, entryNodes) => {
-                void save({ entryNodes })
+                void save({
+                  entryNodes: entryNodes.includes(SELECT_ALL_NODES)
+                    ? [...nodes]
+                    : entryNodes,
+                })
               }}
               slotProps={{
                 paper: selectAllPaper(
@@ -419,11 +435,23 @@ export function SmartClashPanel() {
             <Autocomplete
               multiple
               disableCloseOnSelect
-              options={nodes}
+              options={[SELECT_ALL_NODES, ...nodes]}
               value={data.settings.exitNodes}
               disabled={pending}
+              getOptionLabel={(node) =>
+                node === SELECT_ALL_NODES ? '全选' : node
+              }
+              renderOption={(props, node) => (
+                <li {...props} key={node}>
+                  {node === SELECT_ALL_NODES ? '全选' : node}
+                </li>
+              )}
               onChange={(_, exitNodes) => {
-                void save({ exitNodes })
+                void save({
+                  exitNodes: exitNodes.includes(SELECT_ALL_NODES)
+                    ? [...nodes]
+                    : exitNodes,
+                })
               }}
               slotProps={{
                 paper: selectAllPaper(
