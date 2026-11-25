@@ -20,8 +20,6 @@ SmartClash 是基于 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-
 - 需要系统已启用 WebView2 Runtime（Windows 11 自带；Windows 10 如缺失请安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)）。
 - macOS / Linux 版本尚未发布。
 
-> 当前为重构预览阶段。已在 Windows 完成构建、界面启动与自动化检查；真实节点故障切换、系统代理/TUN 接管和 macOS/Linux 打包仍需进一步验收。
-
 ## 核心功能
 
 | 功能 | 当前实现 |
@@ -77,7 +75,7 @@ SmartClash 国内直连规则默认关闭。启用后使用自有规则仓库的
 | pnpm | 12.16.1，见 [`package.json`](verge/package.json) 的 `packageManager` |
 | Rust | 1.99.1，见 [`rust-toolchain.toml`](verge/rust-toolchain.toml) |
 | Windows | MSVC C++ Build Tools、Windows SDK、WebView2；正常构建目标为 `x86_64-pc-windows-msvc` |
-| macOS/Linux | 对应平台的 [Tauri 构建依赖](https://tauri.app/start/prerequisites/)，目前尚未完成本项目的平台验收 |
+| macOS/Linux | 对应平台的 [Tauri 构建依赖](https://tauri.app/start/prerequisites/)；本项目尚未提供对应平台版本 |
 
 ### Windows 构建
 
@@ -97,7 +95,7 @@ pnpm build
 .\build-preview.ps1
 ```
 
-输出为仓库根目录的 `dist/SmartClash-Verge-Preview/SmartClash.exe`，包含配套内核、WebView 加载库及资源。该目录与前端输出 `verge/dist/` 分开，前端重新构建不会清空预览目录。预览是开发构建，尚未作为正式签名安装包验收。
+输出为仓库根目录的 `dist/SmartClash-Verge-Preview/SmartClash.exe`，包含配套内核、WebView 加载库及资源。该目录与前端输出 `verge/dist/` 分开，前端重新构建不会清空预览目录；正式分发以上方下载区为准。
 
 ### 开发运行
 
@@ -120,7 +118,7 @@ pnpm web:build
 cargo test -p clash-verge --lib --features clippy --locked
 ```
 
-`clippy` 特性沿用上游约定，为代码检查跳过 Tauri 资源准备；通过库测试不等于安装包、系统服务或实网接管验收通过。
+`clippy` 特性沿用上游约定，为代码检查跳过 Tauri 资源准备。
 
 ## 项目结构
 
@@ -142,20 +140,9 @@ SmartClash/
 
 旧 Swift/macOS、iOS 与 Windows/egui 实现已从当前源码树移除，历史版本仍可通过 Git 提交记录查看。
 
-## 验证状态与限制
+## 使用须知
 
-截至 **2026-11-10**，本机验证结果如下：
-
-| 项目 | 状态 |
-| --- | --- |
-| Rust 库测试 | 367 项通过 |
-| 前端测试 | 37 项通过 |
-| 类型检查、架构检查、前端生产构建 | 通过 |
-| Windows 桌面预览 | 已构建、启动，验证地球旋转和缩放 |
-| 真实节点故障切换、系统代理/TUN 接管 | 待实网验收 |
-| macOS/Linux 打包与服务集成 | 待对应平台验收 |
-
-- **系统服务**：当前主线使用 v2.7.7 服务协议。本机验收时，正在运行的旧 Clash Verge 服务与之不兼容，未替换现有服务。遇到提示可选择“稍后配置服务，先查看界面”；重新安装共享服务可能影响另一客户端。
+- **系统服务**：当前主线使用 v2.7.7 服务协议。如果本机正在运行旧 Clash Verge 的共享服务，会出现不兼容提示，可选择“稍后配置服务，先查看界面”；重新安装共享服务可能影响另一客户端。
 - **自动选择**：自动换线只在「连续两次确认故障」（AI 模式须明确探测到 OpenAI 不可达，或完全无 HTTPS 出网）且 10 秒切换冷却结束后触发。429、验证挑战等未知结果不计为故障；定时刷新只更新测量与备选预热。切换不能保证已经建立的 TCP/WebSocket 请求不中断。
 - **配置范围**：仅含 provider 节点的配置可手动使用 `SMARTCLASH`，自动隔离优化和本机聚合导出目前需要内联节点；附加订阅对来源策略组的引用需要改为显式节点。
 - **定位**：公网 IP 通过 [ipwho.is](https://ipwho.is/) 查询，地球定位请求只发送 IP，不附带节点名称、订阅凭据或访问域名。成功结果在内存保留 24 小时，TUN fake-IP 目标可能无法定位。
