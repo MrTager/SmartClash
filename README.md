@@ -10,6 +10,16 @@ SmartClash 是基于 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-
 
 当前仓库只维护 [`verge/`](verge/) 这一套桌面实现。上游基准为 [`c83f7ad`](https://github.com/clash-verge-rev/clash-verge-rev/commit/c83f7ad529c7c9cb3d2d54a0955ef8c1b22a411b)，版本记录见 [`UPSTREAM.json`](verge/UPSTREAM.json)。
 
+## 下载
+
+| 版本 | 平台 | 下载 |
+| --- | --- | --- |
+| **v0.8.0**（2026-11-25） | Windows 10/11 x64 | [SmartClash-v0.8.0-windows-x64.zip](https://github.com/MrTager/SmartClash/releases/download/v0.8.0/SmartClash-v0.8.0-windows-x64.zip) · [全部版本](https://github.com/MrTager/SmartClash/releases) |
+
+- **绿色版，解压即用**，无需安装。校验和见 Release 附件 `SHA256SUMS-v0.8.0-windows.txt`。
+- 需要系统已启用 WebView2 Runtime（Windows 11 自带；Windows 10 如缺失请安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)）。
+- macOS / Linux 版本尚未发布。
+
 > 当前为重构预览阶段。已在 Windows 完成构建、界面启动与自动化检查；真实节点故障切换、系统代理/TUN 接管和 macOS/Linux 打包仍需进一步验收。
 
 ## 核心功能
@@ -17,7 +27,7 @@ SmartClash 是基于 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-
 | 功能 | 当前实现 |
 | --- | --- |
 | 三种智能选路模式 | 低延迟、高速、AI，分别依据真实 HTTPS 延迟、下载吞吐和 OpenAI API 可达性选择候选 |
-| 备用与故障切换 | 后台检测当前线路及备用候选，健康时保持出口，失败时按验证结果与冷却策略切换 |
+| 备用与故障切换 | 后台检测当前线路及备用候选，仅在连续两次确认故障后自动换线；定时刷新只更新测量，不因「别的节点更快」跳转 |
 | 多订阅聚合 | 当前订阅可叠加最多 64 个附加来源，按节点配置去重，同名不同配置保留并添加后缀 |
 | 多跳链路 | 手动组合入口和出口，最多 128 个组合；可选自动探索最多 48 条双跳候选 |
 | 国内直连规则 | 可选使用 [SmartClash-Rules](https://github.com/MrTager/SmartClash-Rules)，国内域名/IP 直连，其余流量走智能策略组 |
@@ -33,14 +43,15 @@ SmartClash 是基于 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-
 
 AI 检测不进行模型推理，也不代表 ChatGPT 网页登录、账号地区资格或模型权限可用。
 
-## 开始使用
+## 快速上手
 
-1. 在“订阅”页面导入配置并更新，沿用原有页面管理订阅来源。
-2. 回到首页，打开“启用智能选路”，选择低延迟、高速或 AI 模式。需要聚合时，在“附加订阅来源”中选择其他配置。
-3. 选择业务流量的使用方式：在“代理”页面将相关业务策略组选择为 **`SMARTCLASH`**；或启用“使用 SmartClash 国内直连规则”，让其替换当前订阅的分流规则。
-4. 点击“按此模式重新选路”，等待真实检测结果，再按需开启系统代理或 TUN。
+1. 下载并解压上方 Windows 压缩包，运行 `SmartClash.exe`。
+2. 在“订阅”页面导入配置并更新，沿用原有页面管理订阅来源。
+3. 回到首页，打开“启用智能选路”，选择低延迟、高速或 AI 模式。需要聚合时，在“附加订阅来源”中选择其他配置。
+4. 选择业务流量的使用方式：在“代理”页面将相关业务策略组选择为 **`SMARTCLASH`**；或启用“使用 SmartClash 国内直连规则”，让其替换当前订阅的分流规则。
+5. 点击“按此模式重新选路”，等待真实检测结果，再按需开启系统代理或 TUN。
 
-**仅启用智能选路开关，不会自动替换订阅中已有的业务选择。** 手动选择 `SMARTCLASH` 组中的节点会关闭自动选择；需要恢复时重新打开“自动维护备用与故障切换”。
+**仅启用智能选路开关，不会自动替换订阅中已有的业务选择。** 手动选择 `SMARTCLASH` 组中的节点会暂停当次会话的自动切换（重启应用或点击“恢复自动选路”可恢复）。
 
 ### 地球动画
 
@@ -145,7 +156,7 @@ SmartClash/
 | macOS/Linux 打包与服务集成 | 待对应平台验收 |
 
 - **系统服务**：当前主线使用 v2.7.7 服务协议。本机验收时，正在运行的旧 Clash Verge 服务与之不兼容，未替换现有服务。遇到提示可选择“稍后配置服务，先查看界面”；重新安装共享服务可能影响另一客户端。
-- **自动选择**：当前线路健康时保留出口。普通明确故障需要连续两次检查，AI 明确故障可提前触发；自动切换有 30 秒冷却，失败候选退避 60 秒。切换不能保证已经建立的 TCP/WebSocket 请求不中断。
+- **自动选择**：自动换线只在「连续两次确认故障」（AI 模式须明确探测到 OpenAI 不可达，或完全无 HTTPS 出网）且 10 秒切换冷却结束后触发。429、验证挑战等未知结果不计为故障；定时刷新只更新测量与备选预热。切换不能保证已经建立的 TCP/WebSocket 请求不中断。
 - **配置范围**：仅含 provider 节点的配置可手动使用 `SMARTCLASH`，自动隔离优化和本机聚合导出目前需要内联节点；附加订阅对来源策略组的引用需要改为显式节点。
 - **定位**：公网 IP 通过 [ipwho.is](https://ipwho.is/) 查询，地球定位请求只发送 IP，不附带节点名称、订阅凭据或访问域名。成功结果在内存保留 24 小时，TUN fake-IP 目标可能无法定位。
 - **数据与更新**：应用使用独立的 `io.github.mrtager.smartclash` 数据目录，开发模式带 `.dev` 后缀；旧版订阅需要手动导入。独立签名更新源准备完成前，SmartClash 应用自动更新保持关闭。
