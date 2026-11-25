@@ -23,12 +23,18 @@ automatically; import them on the Profiles page.
   endpoint without an API key; structured authentication errors establish
   reachability, not account or website access. Unknown challenges and 429
   responses are not treated as definitive endpoint failures.
-- Background monitoring preserves a healthy route, warms up to two standby
+- Background monitoring preserves the current route, warms up to two standby
   candidates, uses a 15 second freshness window, and backs off failed candidates
-  for 60 seconds. Ordinary failure needs two checks; explicit AI failure needs
-  one. Automatic switches have a 30 second cooldown. Each round has a 45 second
-  budget, with up to three isolated probes at once. High speed background checks
-  use HTTPS only; bandwidth downloads require explicit optimization.
+  for 60 seconds. Periodic refreshes only update measurements; they never select
+  another node because it is faster or cheaper. An automatic switch requires two
+  consecutive confirmed failures (in AI mode, `ai_reachable == Some(false)` or
+  no HTTPS egress) plus a 10 second cooldown. Unknown AI results (429, challenge
+  pages, non-JSON bodies) are not failures and never trigger failover. Relaxed
+  fallback to an HTTPS-capable but AI-unverified node excludes candidates already
+  confirmed region-blocked, to avoid hopping between dead routes. Each round has
+  a 45 second budget, with up to three isolated probes at once. High speed
+  background checks use HTTPS only; bandwidth downloads require explicit
+  optimization.
 - Manual selection pauses automatic failover only for the current session; it
   does not rewrite the saved automatic preference, so restarting the app resumes
   automatic failover. Explicit optimization still works while paused, and

@@ -420,6 +420,9 @@ pub async fn patch(settings: Settings) -> Snapshot {
         }
         state.samples.clear();
         state.failed.clear();
+        // 设置变化后重新累计确认故障，避免旧配置的计数触发换线。
+        state.failures = 0;
+        state.last_switch = None;
         state.snapshot.measurements.clear();
         state.snapshot.settings = settings.clone();
         state.snapshot.status = if settings.enabled { "idle" } else { "disabled" }.into();
@@ -462,6 +465,8 @@ pub async fn manual_selection(group: &str, node: &str) -> Result<()> {
     // 避免「曾经手动点过一次节点 → 自动切换被永久关闭且无人记得」导致断线后不切换。
     // 恢复自动：重启应用，或在面板点「恢复自动选路」（optimize 会退出手动状态）。
     state.manual = true;
+    state.failures = 0;
+    state.last_switch = None;
     state.snapshot.selected = Some(node.to_owned());
     state.snapshot.chain = vec![node.to_owned()];
     state.snapshot.status = "manual".into();
@@ -482,6 +487,9 @@ pub async fn optimize() -> Snapshot {
         if state.snapshot.settings.automatic {
             state.manual = false;
         }
+        // 新线路从零开始判定，避免旧线路的失败计数让下一轮立刻再跳。
+        state.failures = 0;
+        state.last_switch = None;
     }
     ensure_monitor();
     STATE.lock().snapshot.clone()
@@ -504,6 +512,43 @@ fn allowed(state: &State, generation: u64) -> bool {
 /// 永久保留当前线路，导致 OpenAI 断线后不切换。该语义需与 plan::eligible 一致。
 fn is_healthy(mode: Mode, measurement: &Measurement) -> bool {
     measurement.latency_ms.is_some() && (mode != Mode::Ai || measurement.ai_reachable == Some(true))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteHealth {
+    Healthy,
+    /// 429 / 挑战页 / 非 JSON 响应：不能证明 OpenAI 可用，也不能证明被墙。
+    Unknown,
+    Failed,
+}
+
+/// 自动换线只看「确认故障」：AI 模式必须明确探测到 OpenAI 不可达
+/// （ai_reachable == Some(false)）或者完全没有 HTTPS 出网。未知结果一律不算故障，
+/// 避免定时刷新把限流/挑战页误判成断线导致节点一直跳。
+fn route_health(mode: Mode, measurement: &Measurement) -> RouteHealth {
+    if measurement.latency_ms.is_none() || (mode == Mode::Ai && measurement.ai_reachable == Some(false)) {
+        RouteHealth::Failed
+    } else if is_healthy(mode, measurement) {
+        RouteHealth::Healthy
+    } else {
+        RouteHealth::Unknown
+    }
+}
+
+/// 只有连续两次确认故障并且切换冷却结束才允许后台换线；
+/// 定时刷新和「别的节点更快」都不能改变当前线路。显式优化不受此限制。
+fn should_failover(
+    explicit: bool,
+    has_baseline: bool,
+    health: Option<RouteHealth>,
+    failures: u32,
+    last_switch: Option<Instant>,
+) -> bool {
+    !explicit
+        && has_baseline
+        && health == Some(RouteHealth::Failed)
+        && failures >= 2
+        && !last_switch.is_some_and(|last| last.elapsed() < SWITCH_COOLDOWN)
 }
 
 fn ranking<'a>(plan: &'a Plan, samples: &HashMap<String, Sample>, settings: &Settings) -> Vec<&'a Candidate> {
@@ -543,14 +588,17 @@ fn ranking<'a>(plan: &'a Plan, samples: &HashMap<String, Sample>, settings: &Set
 /// 兜底选路：只要求候选探测到出网（HTTPS 204 通过、即 latency_ms 有值），
 /// 不要求 AI 可达性确认。用于当前线路已确认故障、但严格准入（ranking）
 /// 没有任何「确认可用」备用的场景，避免卡在完全断线的节点上。
+/// AI 模式排除已明确判定不可达的候选，防止在若干被地区封锁的节点间反复横跳。
 fn relaxed_ranking<'a>(plan: &'a Plan, samples: &HashMap<String, Sample>, settings: &Settings) -> Vec<&'a Candidate> {
     let mut candidates: Vec<_> = plan
         .candidates
         .iter()
         .filter(|candidate| {
-            samples
-                .get(&candidate.name)
-                .is_some_and(|sample| sample.checked.elapsed() <= FRESH && sample.measurement.latency_ms.is_some())
+            samples.get(&candidate.name).is_some_and(|sample| {
+                sample.checked.elapsed() <= FRESH
+                    && sample.measurement.latency_ms.is_some()
+                    && (settings.mode != Mode::Ai || sample.measurement.ai_reachable != Some(false))
+            })
         })
         .collect();
     candidates.sort_by(|left, right| {
@@ -740,24 +788,22 @@ async fn run(explicit: bool) -> Result<()> {
         drop(probes);
         let best = {
             let mut state = STATE.lock();
-            let healthy = baseline
+            let health = baseline
                 .as_ref()
                 .and_then(|name| state.samples.get(name))
                 .filter(|sample| sample.checked.elapsed() <= FRESH)
-                .map(|sample| is_healthy(settings.mode, &sample.measurement));
-            if healthy == Some(true) {
-                state.failures = 0;
-            } else if healthy == Some(false) {
+                .map(|sample| route_health(settings.mode, &sample.measurement));
+            // 只累计连续确认故障：健康或未知结果都会清零，避免 429/挑战页
+            // 与偶发丢包逐渐累积成「断线」。
+            if health == Some(RouteHealth::Failed) {
                 state.failures = state.failures.saturating_add(1);
+            } else {
+                state.failures = 0;
             }
-            // 探测已含重试；确认死亡立即切换，仅用切换冷却防抖（与旧版阈值 1、冷却 10 秒一致）。
-            let preserve = !explicit
-                && baseline.is_some()
-                && (healthy != Some(false)
-                    || state
-                        .last_switch
-                        .is_some_and(|last| last.elapsed() < SWITCH_COOLDOWN));
-            let ready = if preserve {
+            let failover = should_failover(explicit, baseline.is_some(), health, state.failures, state.last_switch);
+            // 定时刷新只更新测量与备选预热，不因为「别的节点更快」换线；
+            // 只有确认连不通 OpenAI 才进入故障切换，显式优化除外。
+            let ready = if !explicit && !failover {
                 plan.candidates
                     .iter()
                     .find(|candidate| Some(candidate.name.as_str()) == baseline.as_deref())
@@ -779,11 +825,9 @@ async fn run(explicit: bool) -> Result<()> {
                 // 显式优化仍坚持严格准入，不对用户隐瞒候选的真实质量。
                 match best {
                     Some(best) => Some(best),
-                    None if !explicit && healthy == Some(false) => {
-                        relaxed_ranking(&plan, &state.samples, &ranking_settings)
-                            .first()
-                            .map(|candidate| (*candidate).clone())
-                    }
+                    None if failover => relaxed_ranking(&plan, &state.samples, &ranking_settings)
+                        .first()
+                        .map(|candidate| (*candidate).clone()),
                     None => None,
                 }
             };
@@ -937,7 +981,50 @@ mod tests {
     }
 
     #[test]
-    fn relaxed_ranking_accepts_reachable_candidates_when_no_confirmed_backup() {
+    fn unknown_ai_probe_never_counts_as_confirmed_failure() {
+        let measure = |latency: Option<u64>, ai: Option<bool>| Measurement {
+            name: "fixture".into(),
+            latency_ms: latency,
+            bytes_per_second: None,
+            ai_reachable: ai,
+        };
+        // 429 / 挑战页 / 非 JSON：未知，既不算健康也不算断线。
+        assert_eq!(route_health(Mode::Ai, &measure(Some(20), None)), RouteHealth::Unknown);
+        assert_eq!(
+            route_health(Mode::Ai, &measure(Some(20), Some(true))),
+            RouteHealth::Healthy
+        );
+        assert_eq!(
+            route_health(Mode::Ai, &measure(Some(20), Some(false))),
+            RouteHealth::Failed
+        );
+        assert_eq!(route_health(Mode::Ai, &measure(None, Some(true))), RouteHealth::Failed);
+        // 非 AI 模式只要求 HTTPS 出网成功。
+        assert_eq!(
+            route_health(Mode::LowLatency, &measure(Some(20), None)),
+            RouteHealth::Healthy
+        );
+        assert_eq!(
+            route_health(Mode::LowLatency, &measure(None, None)),
+            RouteHealth::Failed
+        );
+    }
+
+    #[test]
+    fn only_repeated_confirmed_failure_allows_background_failover() {
+        let health = Some(RouteHealth::Failed);
+        assert!(!should_failover(false, true, health, 1, None));
+        assert!(should_failover(false, true, health, 2, None));
+        // 未知或健康结果不换线；显式优化不受故障判定限制。
+        assert!(!should_failover(false, true, Some(RouteHealth::Unknown), 9, None));
+        assert!(!should_failover(false, true, Some(RouteHealth::Healthy), 0, None));
+        assert!(!should_failover(false, false, health, 9, None));
+        assert!(!should_failover(false, true, health, 9, Some(Instant::now())));
+        assert!(!should_failover(true, false, Some(RouteHealth::Healthy), 0, None));
+    }
+
+    #[test]
+    fn relaxed_ranking_skips_candidates_confirmed_blocked_for_ai() {
         let settings = Settings {
             enabled: true,
             mode: Mode::Ai,
@@ -986,10 +1073,10 @@ mod tests {
         ]);
         // 严格准入：AI 模式下两者都没有确认可达（Some(true)），无候选。
         assert!(ranking(&plan, &samples, &settings).is_empty());
-        // 兜底准入：只看能否出网，AI 可达性不作要求，仍优先非香港出口。
+        // 兜底准入：未知候选（hk）可用；已确认被地区封锁的 jp 不能作为跳板。
         let relaxed = relaxed_ranking(&plan, &samples, &settings);
-        assert_eq!(relaxed.len(), 2);
-        assert_eq!(relaxed[0].name, "jp");
+        assert_eq!(relaxed.len(), 1);
+        assert_eq!(relaxed[0].name, "hk");
     }
 
     #[test]

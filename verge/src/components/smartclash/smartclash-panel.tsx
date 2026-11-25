@@ -260,8 +260,8 @@ export function SmartClashPanel() {
             {data?.settings.mode === 'highSpeed'
               ? '以实际下载吞吐排序，每轮最多 6 个候选，各 1 MiB。'
               : data?.settings.mode === 'ai'
-                ? '验证 HTTPS 出网及 OpenAI API 可达性；不代表网页登录或账号权限。'
-                : '按实际 HTTPS 延迟选择线路，当前线路健康时保持连接。'}
+                ? '验证 HTTPS 出网及 OpenAI API 可达性；仅在连续确认连不通 OpenAI 时自动换线，定时刷新只更新测量。不代表网页登录或账号权限。'
+                : '仅在连续确认当前线路无法出网时自动换线，定时刷新只更新测量，不因延迟变化跳转。'}
           </Typography>
           {autoPaused && (
             <Typography
